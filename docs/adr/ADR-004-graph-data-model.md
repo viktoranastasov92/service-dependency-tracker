@@ -1,95 +1,130 @@
 # ADR-004: Graph Data Model
 
 ## Status
-Proposed
+Accepted — Option 2: Rich `@RelationshipProperties` with `DependsOnRelationship`
 
 ## Context
-The core domain is a directed graph where nodes are services and edges represent "depends on" relationships. The data model must support registering services, adding/removing directed dependency edges, and traversing the graph in both directions (upstream: who depends on me; downstream: what do I depend on). The model must be stored in a relational database (per ADR-003).
+The core domain is a directed graph where nodes are services and edges represent "depends on" relationships. With Neo4j chosen as the persistence layer (ADR-003), the data model is expressed as a property graph — nodes with labels and directed relationships with types — rather than as relational tables. This ADR decides how to map the domain onto Neo4j's node/relationship model using Spring Data Neo4j (SDN) annotations.
 
 ## Decision Drivers
-- The graph is directed: edge direction encodes the dependency direction and must be preserved
-- Traversal queries must efficiently find all ancestors (upstream) and all descendants (downstream) of a node
-- The model must be expressible in a standard relational schema compatible with JPA/Hibernate
-- Cycle detection must be possible using this model (see ADR-006)
-- The schema should be simple enough that a developer can understand it in under five minutes
-- Node and edge metadata (e.g., description, dependency type) should be extensible without schema redesign
+- The graph is directed: relationship direction encodes the dependency direction and must be preserved
+- Traversal must efficiently find all ancestors (upstream) and all descendants (downstream) of a node using Cypher
+- The model must be expressible as SDN `@Node` and `@Relationship` / `@RelationshipProperties` annotations
+- Cycle detection (ADR-006) must be performable as a Cypher reachability query against this model
+- Node and edge metadata (e.g., description, dependency type, timestamps) must be extensible without breaking existing queries
+- The model should be intuitive: a developer unfamiliar with Neo4j should understand it in under five minutes
 
 ## Options Considered
 
-### Option 1: Adjacency List — two tables (`services` + `dependencies`)
-**Description:** Two relational tables. `services` stores one row per service (id, name, description, timestamps). `dependencies` stores one row per directed edge (`from_service_id`, `to_service_id`, optional metadata), where the semantic is "`from` depends on `to`". A unique constraint on `(from_service_id, to_service_id)` prevents duplicate edges.
+### Option 1: Simple `@Relationship` — service nodes with direct references
+**Description:** A single `ServiceNode` class annotated with `@Node("Service")`. Direct dependencies are represented as a `Set<ServiceNode>` field annotated with `@Relationship(type = "DEPENDS_ON", direction = OUTGOING)`. Spring Data Neo4j manages the relationship transparently.
 
+```java
+@Node("Service")
+public class ServiceNode {
+    @Id @GeneratedValue
+    private UUID id;
+
+    @Property("name")
+    private String name;
+
+    @Property("description")
+    private String description;
+
+    @Relationship(type = "DEPENDS_ON", direction = OUTGOING)
+    private Set<ServiceNode> dependsOn = new HashSet<>();
+}
 ```
-services         dependencies
------------      ----------------------------------
-id (PK)          id (PK)
-name (UNIQUE)    from_service_id (FK → services.id)
-description      to_service_id   (FK → services.id)
-created_at       created_at
-```
+
+Cypher shape: `(:Service {name: "A"})-[:DEPENDS_ON]->(:Service {name: "B"})`
 
 **Advantages:**
-- Extremely simple schema — two tables, easy to understand and query
-- Standard SQL: INSERT, DELETE, and SELECT on edges are single-row operations
-- Full JPA mapping: `Service` entity with `@ManyToMany` or a dedicated `Dependency` entity with two `@ManyToOne` references
-- Upstream query: `SELECT * FROM dependencies WHERE to_service_id = ?`; downstream query: `SELECT * FROM dependencies WHERE from_service_id = ?`
-- Adding edge metadata (dependency type, weight) is a simple column addition
+- Minimal code — no separate relationship class required
+- SDN handles CRUD for both nodes and relationships through the single entity
+- Cypher traversal queries are identical regardless of relationship metadata presence
+- Easiest model to understand at a glance
 
 **Trade-offs:**
-- Multi-hop traversal (full transitive closure) requires recursive queries (CTE `WITH RECURSIVE`) or application-level BFS/DFS — the SQL `WITH RECURSIVE` is supported by H2 and PostgreSQL
-- No native cycle detection at the database level; must be enforced in application logic
+- No metadata on the relationship itself (e.g., cannot record when the dependency was registered, or what type it is)
+- Removing a specific dependency edge requires loading the `dependsOn` set, removing the element, and saving — no fine-grained edge deletion by ID
+- Adding relationship metadata later requires migrating to Option 2 (breaking change to the entity model)
 
-**Pick when:** The database is relational (as chosen in ADR-003), the graph is sparse to moderately dense, and simplicity is valued. This is the correct choice for this system.
+**Pick when:** Edge metadata is not needed and will never be needed; simplicity is the top priority.
 
 ---
 
-### Option 2: Closure Table
-**Description:** Three tables: `services`, `direct_dependencies` (immediate edges only), and `dependency_closure` (all ancestor/descendant pairs at every depth, pre-computed). The closure table is updated on every edge insert/delete.
+### Option 2: Rich `@RelationshipProperties` — typed relationship entity
+**Description:** Define a separate `DependsOnRelationship` class annotated with `@RelationshipProperties`. This class holds the relationship's metadata (type, timestamps). The `ServiceNode` holds a `List<DependsOnRelationship>` instead of a `Set<ServiceNode>`.
 
+```java
+@RelationshipProperties
+public class DependsOnRelationship {
+    @RelationshipId
+    private Long id;
+
+    @TargetNode
+    private ServiceNode target;
+
+    private String dependencyType;   // e.g. "RUNTIME", "BUILD", "OPTIONAL"
+    private Instant createdAt;
+}
+
+@Node("Service")
+public class ServiceNode {
+    @Id @GeneratedValue
+    private UUID id;
+    private String name;
+    private String description;
+
+    @Relationship(type = "DEPENDS_ON", direction = OUTGOING)
+    private List<DependsOnRelationship> dependsOn = new ArrayList<>();
+}
 ```
-dependency_closure
-----------------------------------------------
-ancestor_id   (FK → services.id)
-descendant_id (FK → services.id)
-depth         (integer, 0 = self-reference)
-```
+
+Cypher shape: `(:Service)-[:DEPENDS_ON {dependencyType: "RUNTIME", createdAt: ...}]->(:Service)`
 
 **Advantages:**
-- Full transitive closure is a single `SELECT` — no recursion needed at query time
-- Upstream and downstream queries are O(1) SQL lookups
-- Excellent read performance for deep graphs
+- Relationship has its own identity (`@RelationshipId`) — individual edges can be deleted by ID without loading the full set
+- Relationship metadata (type, timestamps, weight) can be added without changing the graph structure or existing Cypher queries
+- Extensible: new properties on the relationship require only a field addition, not a schema migration
+- Dependency type (RUNTIME, BUILD, OPTIONAL) is a natural and useful attribute for blast-radius analysis
 
 **Trade-offs:**
-- Write complexity: inserting or deleting a single edge requires updating O(n) rows in the closure table
-- Schema complexity is significantly higher — three tables with non-obvious invariants to maintain
-- Cycle prevention must still be enforced before inserting (otherwise the closure update logic loops)
-- Overkill for the expected graph size (hundreds of services)
+- Slightly more code than Option 1 — an additional class is required
+- SDN relationship property mapping has occasional quirks (e.g., relationship ID handling differs between Neo4j versions)
+- `List<DependsOnRelationship>` must be navigated to reach target nodes in Java code
 
-**Pick when:** The graph has thousands of nodes, traversal queries dominate the workload, and write operations are rare.
+**Pick when:** Edge metadata is needed now or is likely to be needed (e.g., dependency type, creation timestamp, optional/required flag). Recommended for this system.
 
 ---
 
-### Option 3: Native graph database (Neo4j)
-**Description:** Replace the relational database with Neo4j, a native property graph database. Nodes are `Service` nodes; edges are `DEPENDS_ON` relationships. Traversal is expressed in Cypher (`MATCH (a)-[:DEPENDS_ON*]->(b)`).
+### Option 3: Bidirectional explicit modelling — dual relationship types
+**Description:** Model both directions as explicit relationship types: `DEPENDS_ON` (A→B means A depends on B) and `DEPENDED_ON_BY` (B→A, the inverse). Both are maintained in sync on every write.
+
+```java
+@Relationship(type = "DEPENDS_ON", direction = OUTGOING)
+private List<DependsOnRelationship> dependsOn;
+
+@Relationship(type = "DEPENDED_ON_BY", direction = OUTGOING)
+private List<ServiceNode> dependedOnBy;
+```
 
 **Advantages:**
-- Traversal queries are idiomatic and concise in Cypher
-- Native cycle detection and path queries are built into the query language
-- Spring Data Neo4j provides a JPA-like mapping layer
+- Upstream and downstream traversal Cypher queries are symmetric in form — both follow outgoing edges
+- Eliminates the need for `direction = INCOMING` in queries, which some developers find confusing
 
 **Trade-offs:**
-- Requires running a separate Neo4j server (Docker or native install) — significantly more infrastructure than H2
-- The team must learn Cypher in addition to Java
-- Spring Data Neo4j is less mature and less documented than Spring Data JPA
-- Replaces the H2/PostgreSQL migration path with a completely different database technology
-- Overkill for hundreds of services where a simple adjacency list works perfectly well
+- Every edge insert/delete must maintain two relationships atomically — doubled write complexity
+- Data integrity: if the two relationship types diverge (e.g., a crash mid-write), the graph is inconsistent
+- Cypher natively handles direction with `<-[:DEPENDS_ON]-` syntax — the symmetry benefit is marginal
+- Neo4j's native traversal handles incoming/outgoing direction efficiently; there is no query performance reason to duplicate edges
 
-**Pick when:** The graph has millions of nodes and edges, traversal depth exceeds 10 hops regularly, and the team has Neo4j expertise.
+**Pick when:** Never for this system — Cypher handles both directions natively, and dual relationship maintenance adds risk with no real benefit.
 
 ## Recommendation
-**Option 1: Adjacency List with two tables.** It maps cleanly to JPA entities, is trivially understandable, and handles the expected data volume with ease. Multi-hop traversal is implemented in application-layer BFS/DFS (see ADR-005), which is the correct separation of concerns — the database stores data, the application traverses it.
+**Option 2: Rich `@RelationshipProperties` with `DependsOnRelationship`.** The domain will benefit from knowing when a dependency was registered and what type it is (runtime vs. build-time vs. optional). These are natural attributes that help on-call engineers interpret blast-radius results. The extra class is a small cost for meaningful extensibility. All Cypher traversal queries work identically whether the relationship has properties or not.
 
 ## Consequences
-**If accepted:** Create `ServiceEntity` (id, name, description, createdAt) and `DependencyEntity` (id, fromService, toService, createdAt) JPA entities. Add a unique constraint on `(from_service_id, to_service_id)`. The `DependencyEntity` uses two `@ManyToOne(fetch = LAZY)` associations to `ServiceEntity`. Repository interfaces extend `JpaRepository`.
+**If accepted:** Define `ServiceNode` (`@Node("Service")`) with `id`, `name`, `description`, and `List<DependsOnRelationship> dependsOn`. Define `DependsOnRelationship` (`@RelationshipProperties`) with `@RelationshipId Long id`, `@TargetNode ServiceNode target`, `String dependencyType`, and `Instant createdAt`. Both classes live in the `domain` package. The `ServiceRepository` extends `Neo4jRepository<ServiceNode, UUID>`. Upstream queries use `direction = INCOMING` in Cypher or `MATCH (dep)-[:DEPENDS_ON]->(s)`.
 
-**Watch out for:** The self-referential foreign keys (`from_service_id` and `to_service_id` both point to `services.id`) require that the referenced service exists before an edge can be inserted — enforce this at the service layer to return a meaningful error rather than a database constraint violation.
+**Watch out for:** SDN eagerly loads the full subgraph by default when fetching a `ServiceNode` — this will pull in the entire connected graph for a well-connected node. Use `@Query` with explicit Cypher to load only the immediate neighbours when that is all that is needed for a given operation. Never call `findAll()` on the repository without a depth or projection limit.
