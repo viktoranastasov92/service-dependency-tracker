@@ -1,7 +1,7 @@
 # ADR-009: Testing Strategy
 
 ## Status
-Proposed
+Accepted — Option 1: Three-tier pyramid (Mockito unit tests + `@WebMvcTest` slices + `@DataNeo4jTest` / `@SpringBootTest` with Testcontainers Neo4j)
 
 ## Context
 A system responsible for providing accurate blast-radius information during incidents must be highly reliable. With Neo4j chosen as the persistence layer (ADR-003), the integration test strategy must account for the absence of an embedded in-memory database — there is no Neo4j equivalent of H2 `:mem:`. Integration tests that exercise the Neo4j repository layer must use either Testcontainers (a real Neo4j Docker container) or Spring Data Neo4j's `@DataNeo4jTest` slice with Testcontainers. This ADR defines the three-tier test pyramid for this specific stack.

@@ -1,7 +1,7 @@
 # ADR-010: UI / Frontend Approach
 
 ## Status
-Proposed
+Accepted — Option 1: React (Vite) with `react-flow` for graph visualization
 
 ## Context
 The system needs a user interface for on-call engineers to visualize the service dependency graph, search for services, and explore upstream/downstream relationships. The requirements specify the UI should consume the REST API and suggest fetch API or Axios as the HTTP client. The scale is an internal tool — it does not need to support millions of users or SEO.

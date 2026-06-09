@@ -1,7 +1,7 @@
 # ADR-007: API Design Conventions
 
 ## Status
-Proposed
+Accepted — Option 1: Resource-oriented REST with nested sub-resources for graph queries
 
 ## Context
 The system exposes a RESTful HTTP API that frontend clients and potentially other internal tools will consume. The API must be intuitive enough that an on-call engineer can understand it without reading extensive documentation, and consistent enough that clients can be written once without case-by-case special handling.

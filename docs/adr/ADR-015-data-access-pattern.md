@@ -1,7 +1,7 @@
 # ADR-015: Data Access Pattern
 
 ## Status
-Proposed
+Accepted — Option 1: Spring Data Neo4j `Neo4jRepository` with `@Query` Cypher annotations
 
 ## Context
 With Neo4j chosen as the persistence layer (ADR-003) and the property graph model defined (ADR-004), the data access pattern determines how the application reads and writes nodes and relationships. Spring Data Neo4j (SDN) offers several levels of abstraction — from fully automated repository interfaces to low-level driver sessions. This ADR decides the right balance between abstraction and control for this system's access patterns.

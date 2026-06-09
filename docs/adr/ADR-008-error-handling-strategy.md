@@ -1,7 +1,7 @@
 # ADR-008: Error Handling Strategy
 
 ## Status
-Proposed
+Accepted — Option 1: `@RestControllerAdvice` with a centralized `GlobalExceptionHandler`
 
 ## Context
 A REST API that returns inconsistent or opaque error responses is difficult to consume and debug. The system must communicate errors — validation failures, missing resources, cycle conflicts, duplicate registrations — in a uniform, machine-readable format so that both the UI and programmatic clients can handle them reliably without parsing error messages.
@@ -26,13 +26,17 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ApiError> handleNotFound(ServiceNotFoundException ex, HttpServletRequest req) {
         return ResponseEntity.status(404).body(new ApiError(404, "Not Found", ex.getMessage(), req.getRequestURI()));
     }
-    @ExceptionHandler(CycleDetectedException.class)
-    public ResponseEntity<ApiError> handleCycle(CycleDetectedException ex, HttpServletRequest req) {
+    @ExceptionHandler(DuplicateServiceException.class)
+    public ResponseEntity<ApiError> handleDuplicate(DuplicateServiceException ex, HttpServletRequest req) {
         return ResponseEntity.status(409).body(new ApiError(409, "Conflict", ex.getMessage(), req.getRequestURI()));
     }
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ResponseEntity<ApiError> handleValidation(MethodArgumentNotValidException ex, HttpServletRequest req) {
         // collect field errors
+    }
+    @ExceptionHandler(Exception.class)
+    public ResponseEntity<ApiError> handleUnexpected(Exception ex, HttpServletRequest req) {
+        return ResponseEntity.status(500).body(new ApiError(500, "Internal Server Error", "An unexpected error occurred", req.getRequestURI()));
     }
 }
 ```
@@ -113,6 +117,6 @@ public ResponseEntity<?> addDependency(@PathVariable String id, @RequestBody Dep
 **Option 1: `@RestControllerAdvice` with a centralized `GlobalExceptionHandler`.** It keeps controllers clean, provides a uniform error contract, and is the standard Spring Boot pattern. Consider adopting `ProblemDetail` (Option 2) as the `ApiError` body format to get RFC 9457 compliance with minimal extra effort — the two options compose naturally.
 
 ## Consequences
-**If accepted:** Create the following custom exceptions: `ServiceNotFoundException` (404), `DuplicateServiceException` (409), `CycleDetectedException` (409), `DependencyNotFoundException` (404). The `GlobalExceptionHandler` maps each to a consistent `ApiError` response. Add a catch-all handler for `Exception.class` that returns 500 without exposing the stack trace. Configure `server.error.include-stacktrace=never` in `application.properties`.
+**If accepted:** Create the following custom exceptions: `ServiceNotFoundException` (404), `DependencyNotFoundException` (404), `DuplicateServiceException` (409). Note: there is no `CycleDetectedException` — cycles are valid data per ADR-006 Option 2; they are stored without error and reported as annotations in traversal responses, never rejected. The `GlobalExceptionHandler` maps each exception to a consistent `ApiError` response and includes a catch-all handler for `Exception.class` returning 500 without stack trace. Configure `server.error.include-stacktrace=never` in `application.properties`.
 
 **Watch out for:** Bean Validation errors (`@Valid` on request bodies) produce `MethodArgumentNotValidException` with a list of field-level errors. The handler must iterate `ex.getBindingResult().getFieldErrors()` and include them in the response — a single top-level `message` is not enough for form validation feedback in the UI.

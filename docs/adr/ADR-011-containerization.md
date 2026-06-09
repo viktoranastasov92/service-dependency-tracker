@@ -1,7 +1,7 @@
 # ADR-011: Containerization
 
 ## Status
-Proposed
+Accepted — Option 1: Multi-stage Dockerfile + Docker Compose with Neo4j healthcheck and `depends_on: condition: service_healthy`
 
 ## Context
 With Neo4j chosen as the persistence layer (ADR-003), local development now requires a running Neo4j instance — there is no embedded fallback equivalent to H2. This makes Docker a practical requirement for local development rather than a purely optional convenience. The containerization strategy must therefore cover both the Spring Boot application and the Neo4j database as a coherent local stack, while keeping developer onboarding simple.
@@ -143,9 +143,44 @@ volumes:
 **Pick when:** The primary development workflow is `./mvnw spring-boot:run` with hot reload, and the team wants Neo4j managed by Docker while keeping the app on the host JVM.
 
 ## Recommendation
-**Option 3: Docker Compose for Neo4j only, plus a production Dockerfile.** This preserves the fast `./mvnw spring-boot:run` development loop (with Spring DevTools hot reload) while keeping Neo4j managed and reproducible via Docker. The Dockerfile is available for production and CI builds. When a fully containerized demo or handoff is needed, switch to Option 1 by adding the `app` service to the Compose file — it requires only a few lines and the Dockerfile is already in place.
+**Option 1: Multi-stage Dockerfile + Docker Compose with Neo4j and app as services.** The `depends_on: condition: service_healthy` constraint on the Neo4j healthcheck eliminates the startup race condition at the infrastructure level — the app container does not start until Neo4j's HTTP endpoint confirms readiness. This is more reliable than any application-level retry mechanism.
 
 ## Consequences
-**If accepted:** Add `docker-compose.yml` to the project root with the `neo4j` service and a named `neo4j-data` volume. Add `Dockerfile` (multi-stage) for the app. Add `.dockerignore` excluding `target/`, `.git/`, and `node_modules/`. Configure `application.properties` to connect to `bolt://localhost:7687` by default (matching the Compose port mapping). Document the two-step local start (`docker compose up -d` then `./mvnw spring-boot:run`) in `HELP.md`. Expose `NEO4J_AUTH_PASSWORD` as an environment variable override so the Compose password is not hardcoded in `application.properties`.
+**If accepted:** Add `docker-compose.yml` to the project root with both the `neo4j` and `app` services. Configure a Neo4j healthcheck on the HTTP port (`7474`) with `start_period: 30s` to account for Neo4j's JVM warm-up. Set `depends_on: neo4j: condition: service_healthy` on the app service. Add a multi-stage `Dockerfile` for the app. Add `.dockerignore` excluding `target/`, `.git/`, and `node_modules/`. Configure `application.properties` to read Neo4j connection details from environment variables (`SPRING_NEO4J_URI`, `SPRING_NEO4J_AUTHENTICATION_USERNAME`, `SPRING_NEO4J_AUTHENTICATION_PASSWORD`) so the same image works in any environment. Document `docker compose up --build` as the single command to start the full stack in `HELP.md`.
 
-**Watch out for:** Neo4j takes 10–15 seconds to be ready after the container starts. The Spring Boot app will fail to connect if started immediately after `docker compose up`. Add a startup retry mechanism via Spring Boot's `spring.neo4j.pool.connection-acquisition-timeout` or a `depends_on` healthcheck in the full Compose stack (Option 1). For Testcontainers in CI (ADR-009), this is handled automatically by the `waitingFor` strategy on the `Neo4jContainer`.
+The full Compose stack:
+```yaml
+services:
+  neo4j:
+    image: neo4j:5
+    environment:
+      NEO4J_AUTH: neo4j/trackerpassword
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_NEO4J_URI: bolt://neo4j:7687
+      SPRING_NEO4J_AUTHENTICATION_USERNAME: neo4j
+      SPRING_NEO4J_AUTHENTICATION_PASSWORD: trackerpassword
+    depends_on:
+      neo4j:
+        condition: service_healthy
+
+volumes:
+  neo4j-data:
+```
+
+**Watch out for:** The development iteration loop is slower with this option — every code change requires `docker compose up --build` to rebuild the app image. For rapid local development, run `docker compose up -d neo4j` to start only Neo4j, then run the app with `./mvnw spring-boot:run` pointing at `bolt://localhost:7687`; accept that in this mode the startup race must be managed manually (wait for Neo4j to be ready before starting the app). For Testcontainers in CI (ADR-009), the race condition is handled automatically by the `waitingFor` strategy on the `Neo4jContainer` — no Compose involvement needed in CI.
