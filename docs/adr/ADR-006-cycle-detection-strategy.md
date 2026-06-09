@@ -1,83 +1,111 @@
 # ADR-006: Cycle Detection Strategy
 
 ## Status
-Proposed
+Accepted — Option 2: Allow cycles; detect and report at read time
 
 ## Context
-A directed dependency graph can contain cycles (e.g., service A depends on B, B depends on C, C depends on A). The requirements ask the system to "handle potential cycles." The system must decide whether to prevent cycles at write time, detect and report them at read time, or a combination. Cycles can cause infinite traversal loops if not handled, making the traversal algorithm's visited-set guard (ADR-005) necessary regardless of this decision.
+A directed dependency graph can contain cycles (e.g., service A depends on B, B depends on C, C depends on A). The requirements ask the system to "handle potential cycles." With Neo4j chosen as the persistence layer (ADR-003), cycle detection can be expressed as a Cypher reachability query — a single database call — rather than an application-level graph traversal. This ADR decides whether cycles are prevented at write time, detected at read time, or both.
 
 ## Decision Drivers
-- Cycles in a dependency graph may represent real misconfiguration that on-call engineers need to be alerted to
-- Preventing cycles at write time (pre-check before insert) gives users immediate, actionable feedback
-- Allowing cycles but reporting them at read time is more permissive but may mask problems
-- The cycle check algorithm must run in the same transaction as the edge insert to be race-condition safe
-- The solution must be testable in isolation
+- Cycles in a service dependency graph represent a real misconfiguration that on-call engineers must know about
+- Preventing cycles at write time gives users immediate, actionable feedback and keeps the graph in a known-good state
+- The cycle check must be atomic with the edge insert to prevent TOCTOU race conditions
+- With Neo4j, the reachability check is a single Cypher query — significantly simpler than the application-level DFS required with a relational database
+- The traversal algorithm (ADR-005) relies on Neo4j's native cycle avoidance in variable-length paths — but a defense-in-depth visited set remains valuable
 
 ## Options Considered
 
-### Option 1: Pre-insert cycle check (DFS-based, prevent cycles at write time)
-**Description:** Before persisting a new dependency edge `(A → B)`, run a directed DFS from `B` to check if `A` is reachable from `B`. If it is, the proposed edge would create a cycle — reject it with a `409 Conflict` HTTP response and a descriptive error message. If it is not, persist the edge.
+### Option 1: Pre-insert Cypher reachability check (prevent cycles at write time)
+**Description:** Before persisting a new dependency edge `A → B`, execute a Cypher query that checks whether `A` is already reachable from `B` via any existing path. If yes, the proposed edge would close a cycle — reject it with `HTTP 409 Conflict` and a descriptive message. If no, proceed with the insert. Both the check and the insert run within the same Neo4j transaction.
 
+```cypher
+// Would adding A → B create a cycle?
+// Check: is A reachable from B through existing DEPENDS_ON edges?
+MATCH (b:Service {name: $targetName})-[:DEPENDS_ON*0..]->(a:Service {name: $sourceName})
+RETURN count(a) > 0 AS wouldCreateCycle
 ```
-// Before saving edge A → B:
-// Check: is A reachable from B?
-if (isReachable(B, A)) {
-    throw new CycleDetectedException("Adding A→B would create a cycle");
-}
+
+If `wouldCreateCycle` is `true`, throw `CycleDetectedException` and return `409 Conflict`.
+
+To include the cycle path in the error response:
+```cypher
+MATCH path = (b:Service {name: $targetName})-[:DEPENDS_ON*1..]->(a:Service {name: $sourceName})
+RETURN [node IN nodes(path) | node.name] AS cyclePath
+LIMIT 1
 ```
 
 **Advantages:**
-- The graph remains acyclic at all times — traversal code does not need cycle guards at query time
-- Immediate user feedback: the error message can include the cycle path for debugging
-- The invariant is enforced at the domain layer, not scattered across traversal code
-- Simple to reason about: the graph is a DAG (Directed Acyclic Graph) by construction
+- The graph is guaranteed to be a DAG (Directed Acyclic Graph) at all times — traversal code never encounters a cycle
+- Immediate feedback to the caller: the `409` response can include the exact path that would be closed (`"B → C → A → B"`)
+- The check is a single Cypher query — far simpler than an application-level DFS reachability check
+- Running inside the same transaction as the insert eliminates the TOCTOU window (Neo4j's write lock on the transaction prevents a concurrent insert from racing through)
+- The cycle check is easy to unit-test: mock the repository to return `true` or `false` and verify the service layer behavior
 
 **Trade-offs:**
-- The reachability check adds latency to every edge-insertion request (proportional to graph depth)
-- If cycle detection is run outside a database transaction, a concurrent insert could violate the invariant — must run inside the same transaction or use a distributed lock
-- Some real-world dependency graphs do have cycles (e.g., mutual runtime dependencies); preventing them blocks valid data entry
+- The reachability query adds latency to every edge-insertion request (Neo4j traverses the graph to check reachability)
+- On very large or deeply connected graphs, an unbounded `[:DEPENDS_ON*0..]` may be slow — a depth cap (e.g., `*0..50`) matching ADR-005's `max-depth` provides a practical bound
+- Some real-world dependency graphs legitimately have cycles (mutual runtime dependencies); if GlobalCorp needs to represent these, prevention is the wrong policy — but the requirements treat this as invalid data
 
-**Pick when:** The business rule is that cycles represent invalid data and must be prevented. This is the recommended choice.
+**Pick when:** The business rule is that cycles are invalid and must be prevented. This is the recommended approach for this system.
 
 ---
 
-### Option 2: Allow cycles; detect and annotate at read time
-**Description:** Accept any edge insert without validation. When a traversal query is executed, use the visited-set BFS (ADR-005) which naturally terminates when it encounters already-visited nodes. Optionally, run a separate cycle-detection pass (Tarjan's or Kahn's algorithm) and include a `hasCycle: true` flag and the cycle members in the traversal response.
+### Option 2: Allow cycles; detect and report at read time
+**Description:** Accept any edge insert without validation. When a traversal or query is executed, run a separate Cypher cycle-detection query and include cycle information in the response.
+
+```cypher
+// Detect all cycles reachable from a given service
+MATCH path = (s:Service {name: $name})-[:DEPENDS_ON*]->(s)
+RETURN [node IN nodes(path) | node.name] AS cycle
+LIMIT 10
+```
+
+Include a `cycles` array in the traversal response DTO when cycles are detected.
 
 **Advantages:**
 - Writes are always fast — no graph traversal on insert
-- Supports data imports where cycles exist in legacy records
+- Supports importing legacy data where cycles exist and cannot be cleaned up immediately
 - Engineers can see cycles in query results and decide whether they are real or accidental
 
 **Trade-offs:**
-- The graph is allowed to be in an inconsistent state indefinitely
-- Traversal results can be confusing: the same service may appear in both upstream and downstream sets
-- Every consumer of traversal results must be written to handle cyclic graphs
-- More complex traversal response schema (cycle annotations)
+- The graph is allowed to be in an inconsistent/potentially-invalid state indefinitely
+- Every consumer of traversal results must handle cyclic graphs — complexity leaks into every downstream component
+- Cycle-detection queries (`MATCH (s)-[:DEPENDS_ON*]->(s)`) without bounds are expensive and may not terminate on complex graphs
+- ADR-005's Cypher variable-length traversal relies on Neo4j's internal visited-node tracking; with cycles, the `DISTINCT` on results is still safe, but reasoning about correctness becomes harder
 
-**Pick when:** Data is ingested from external systems where cycles cannot be prevented, and the system's role is to report the state of the graph rather than enforce its correctness.
+**Pick when:** Data is ingested from external systems where cycles cannot be prevented, or the system's role is purely observational rather than authoritative.
 
 ---
 
-### Option 3: Hybrid — prevent cycles on direct API writes, flag on bulk import
-**Description:** The normal REST API (POST a dependency) enforces no-cycle pre-check (Option 1). A separate bulk-import endpoint accepts a set of edges without validation, and after import runs a background cycle-detection job (Tarjan's SCC algorithm) that flags cyclic services in the database. Flagged services surface a warning in traversal responses.
+### Option 3: Hybrid — prevent cycles via API, flag on bulk import
+**Description:** The normal REST API (POST a dependency) enforces the pre-insert Cypher check (Option 1). A separate bulk-import endpoint accepts a batch of edges without the per-edge check, then runs a Cypher all-cycles scan as a post-import validation step and flags any cyclic nodes in Neo4j with a `hasCycle: true` property.
+
+```cypher
+// Post-import: find and flag all nodes involved in cycles
+MATCH (s:Service)-[:DEPENDS_ON*]->(s)
+SET s.hasCycle = true
+RETURN s.name
+```
+
+Normal traversal responses include `hasCycle` in the service DTO when the property is set.
 
 **Advantages:**
-- Covers both normal operation (clean graph) and migration/import scenarios (legacy data)
-- Tarjan's SCC algorithm is O(V + E) and can run as a scheduled task
-- Users get clean immediate validation on normal writes
+- Covers both normal operation (clean graph) and migration/import scenarios
+- Tarjan's SCC equivalent is expressible in Cypher — no application-level algorithm needed
+- Users get immediate validation feedback on normal writes and deferred cycle warnings on imports
 
 **Trade-offs:**
-- Highest implementation complexity of the three options
-- The window between bulk import and cycle detection leaves the graph in an unknown state
-- Two code paths for dependency creation must be maintained and tested separately
+- Two code paths for dependency creation must be maintained and tested
+- The window between bulk import and post-import cycle scan leaves the graph in an unknown state
+- Adds schema complexity: `hasCycle` property on `ServiceNode` that is only populated conditionally
+- Overkill for a greenfield system with no legacy data to import
 
-**Pick when:** The system must support both strict real-time validation for normal use and permissive batch loading from legacy systems.
+**Pick when:** The system must onboard legacy service registry data that may contain cycles, alongside strict enforcement for new entries.
 
 ## Recommendation
-**Option 1: Pre-insert cycle check.** For a new system with no legacy data to import, preventing cycles at write time is the simplest strategy that keeps the graph in a well-defined DAG state. The performance cost is negligible at the expected data scale (hundreds of services). The traversal code (ADR-005) still maintains its visited-set guard as a defense-in-depth measure.
+**Option 1: Pre-insert Cypher reachability check.** For a greenfield system, preventing cycles at write time keeps the graph in a well-defined DAG state with zero implementation complexity beyond a single `@Query` method. The check is a natural fit for Neo4j — one Cypher query replaces what would have been an application-level BFS in a relational setup. The `409` response with the cycle path gives engineers exactly the information they need to correct their input.
 
 ## Consequences
-**If accepted:** Add a `CycleDetectionService` that performs a DFS/BFS reachability check from the target node back to the source node before every edge insert. This check runs within the same `@Transactional` method as the edge insert to prevent TOCTOU race conditions. Return `HTTP 409 Conflict` with a body explaining which existing path would be completed by the proposed edge. Unit tests should cover: no cycle (insert succeeds), direct cycle (A→B, B→A), and transitive cycle (A→B, B→C, C→A).
+**If accepted:** Add a `boolean wouldCreateCycle(String sourceName, String targetName)` method to `ServiceRepository` backed by the Cypher reachability query. Add a `findCyclePath(String sourceName, String targetName)` method that returns the path as a `List<String>` for the error message. The service layer calls `wouldCreateCycle` before every `addDependency` operation, within the same `@Transactional` method. Throw a domain exception `CycleDetectedException(List<String> path)` that the `@RestControllerAdvice` maps to `HTTP 409 Conflict` with a body of `{ "error": "CYCLE_DETECTED", "path": ["A", "C", "B", "A"] }`.
 
-**Watch out for:** The cycle check itself is a graph traversal — if the graph is very large, it adds latency to edge inserts. If this becomes a bottleneck, add a circuit-breaker that limits traversal depth and rejects edges that would require a full traversal of more than N nodes to verify.
+**Watch out for:** The `[:DEPENDS_ON*0..]` unbounded pattern in the reachability query will follow all paths. Add an explicit upper bound matching `tracker.traversal.max-depth` (ADR-005) to prevent the cycle check itself from becoming a runaway query on a large graph.

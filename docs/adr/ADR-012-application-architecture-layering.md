@@ -1,7 +1,7 @@
 # ADR-012: Application Architecture Layering
 
 ## Status
-Proposed
+Accepted — Option 1: Classic three-layer architecture (Controller → Service → Repository)
 
 ## Context
 The internal package and class structure of the backend determines how easily the codebase can be navigated, tested, and evolved. An explicit layering decision prevents the codebase from collapsing into a single package of mixed concerns, which is particularly problematic for a domain with non-trivial logic like graph traversal and cycle detection.

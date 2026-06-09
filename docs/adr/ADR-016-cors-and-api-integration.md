@@ -1,7 +1,7 @@
 # ADR-016: CORS and API Integration Between Frontend and Backend
 
 ## Status
-Proposed
+Accepted — Option 1: Vite proxy in development + Spring Boot serves static files in production
 
 ## Context
 The frontend (React/Vite, ADR-010) and backend (Spring Boot, ADR-001) run on different ports during development (Vite on :5173, Spring Boot on :8080). The browser's Same-Origin Policy blocks cross-origin requests by default, requiring explicit CORS configuration. In production, both are served from the same origin (Spring Boot serves the built frontend static files), eliminating the need for CORS. This ADR decides how to handle cross-origin requests in development and how to structure the frontend-backend integration in production.

@@ -1,110 +1,125 @@
 # ADR-005: Graph Traversal Algorithm
 
 ## Status
-Proposed
+Accepted — Option 1 (Cypher variable-length path) for traversal; Option 3 (path-collecting Cypher) for the UI visualization endpoint
 
 ## Context
-A core feature of the system is returning the full dependency chain of a given service — both the set of services that transitively depend on it (upstream/ancestors) and the set of services it transitively depends on (downstream/descendants). The traversal must work correctly even in the presence of graph cycles (which are detected separately per ADR-006 but may exist in data loaded before cycle detection was enforced).
+A core feature of the system is returning the full dependency chain of a given service — both the set of services that transitively depend on it (upstream/ancestors) and the set of services it transitively depends on (downstream/descendants). With Neo4j chosen as the persistence layer (ADR-003), traversal can be expressed as a single Cypher query using variable-length path syntax, pushed entirely to the database — or it can remain in application-layer code using Spring Data Neo4j repositories. This ADR decides the implementation approach.
 
 ## Decision Drivers
-- Correctness: the algorithm must visit every reachable node exactly once, even if cycles exist
-- The graph fits in JVM memory at the expected scale (hundreds to low thousands of nodes)
-- The algorithm must run inside the Spring service layer without requiring a special database query
-- The result set should clearly distinguish direct dependencies from transitive ones if needed
+- Correctness: every reachable node must be visited exactly once, regardless of graph shape or depth
+- Cycle safety: cycles are explicitly allowed (ADR-006); the traversal must terminate correctly on cyclic graphs — `DISTINCT` on results and Neo4j's internal visited-node tracking during variable-length traversal are both required, not optional guards
+- Neo4j is a native graph engine — traversal is its primary strength; pushing traversal to the database is idiomatic
+- Results should be useful for blast-radius analysis: knowing the distance (hop count) from the origin is valuable
 - The algorithm must be unit-testable in isolation from the database
-- Performance: sub-second response for graphs of up to 10,000 nodes is the target
+- Performance: sub-second response for graphs up to 10,000 nodes
 
 ## Options Considered
 
-### Option 1: Iterative BFS (Breadth-First Search) with visited set
-**Description:** Starting from the given service node, maintain a queue (FIFO) of nodes to visit and a `Set<String>` of already-visited node IDs. For each node dequeued, load its direct neighbors from the repository, add unvisited neighbors to the queue and the visited set, and continue until the queue is empty. The visited set is the result.
+### Option 1: Cypher variable-length path query (database-side traversal)
+**Description:** Express the full transitive traversal as a single Cypher query using variable-length relationship syntax (`[:DEPENDS_ON*]`). Neo4j executes the traversal natively using index-free adjacency — no application-level looping required.
 
+Downstream (what does service A transitively depend on?):
+```cypher
+MATCH (s:Service {name: $name})-[:DEPENDS_ON*1..]->(dep:Service)
+RETURN DISTINCT dep
 ```
-Queue<String> queue = new LinkedList<>();
-Set<String> visited = new LinkedHashSet<>();
+
+Upstream (what services transitively depend on service A?):
+```cypher
+MATCH (dep:Service)-[:DEPENDS_ON*1..]->(s:Service {name: $name})
+RETURN DISTINCT dep
+```
+
+With hop depth included:
+```cypher
+MATCH path = (s:Service {name: $name})-[:DEPENDS_ON*1..]->(dep:Service)
+RETURN dep, min(length(path)) AS depth
+ORDER BY depth
+```
+
+**Advantages:**
+- Single round-trip to the database — no N+1 queries regardless of graph depth or width
+- Neo4j's index-free adjacency makes multi-hop traversal O(edges touched), not O(total graph size)
+- `DISTINCT` is mandatory: with cycles allowed (ADR-006), the same node is reachable via an unbounded number of paths — without `DISTINCT`, the result set would contain duplicates for every distinct path that reaches a given node
+- Neo4j's variable-length traversal has built-in cycle termination: it tracks visited relationships internally per path and will not traverse the same relationship twice within a single path, preventing infinite loops on cyclic graphs
+- Hop depth is available via `length(path)` — directly useful for blast-radius tier reporting
+- No application-side traversal code to write or test — the Cypher query is the algorithm
+
+**Trade-offs:**
+- The traversal logic lives in a Cypher string — harder to step through in a debugger than Java code
+- Variable-length queries without an upper bound (`*1..`) can be slow on extremely dense or deep graphs; a practical upper-bound (`*1..20`) is a sensible guard
+- Unit testing requires either a running Neo4j instance (via Testcontainers) or a mocked repository
+
+**Pick when:** Neo4j is the persistence layer (as chosen in ADR-003). This is the idiomatic and recommended approach.
+
+---
+
+### Option 2: Application-side iterative BFS using Spring Data Neo4j repositories
+**Description:** Load direct neighbours one hop at a time using SDN repository calls, maintaining a queue and visited set in the application layer — the same BFS pattern that would be used with a relational database.
+
+```java
+Queue<UUID> queue = new LinkedList<>();
+Set<UUID> visited = new LinkedHashSet<>();
 queue.add(startId);
 while (!queue.isEmpty()) {
-    String current = queue.poll();
+    UUID current = queue.poll();
     if (visited.contains(current)) continue;
     visited.add(current);
-    for (String neighbor : getDirectNeighbors(current)) {
-        if (!visited.contains(neighbor)) queue.add(neighbor);
-    }
+    serviceRepository.findDirectDependencies(current)
+        .stream()
+        .filter(dep -> !visited.contains(dep.getId()))
+        .forEach(dep -> queue.add(dep.getId()));
 }
 ```
 
 **Advantages:**
-- Naturally produces results in order of distance from the origin — useful for showing "blast radius tiers"
-- The visited set guarantees each node is processed once, making it safe against cycles
-- Iterative implementation avoids JVM stack overflow on deep graphs (unlike recursive DFS)
-- Easy to understand, test, and explain to stakeholders
-- Can be adapted to return depth/level information alongside each node
+- Pure Java — easy to step through in a debugger and unit-test by mocking the repository
+- Cycle safety is explicit and visible in the code (visited set)
+- Familiar to developers who have not worked with Cypher
 
 **Trade-offs:**
-- Queue and visited set consume O(n) memory — acceptable at this scale
-- Slightly more complex to implement than recursive DFS, but the iterative form is worth the safety
+- One repository call per hop level — O(depth) round-trips to Neo4j instead of one
+- Wastes Neo4j's primary strength: native graph traversal is completely bypassed
+- More code to write, own, and maintain than a Cypher query
+- No depth/tier information without additional bookkeeping
 
-**Pick when:** Level-order (tier) information is useful, or when maximum clarity and cycle safety are priorities. Recommended for this system.
+**Pick when:** The team has no Cypher experience and needs to ship quickly; acceptable as a first implementation to be replaced once Cypher comfort grows.
 
 ---
 
-### Option 2: Recursive DFS (Depth-First Search) with visited set
-**Description:** Starting from the given node, recursively visit each unvisited neighbor depth-first. The visited set prevents re-visiting nodes and breaks cycles.
+### Option 3: Cypher with explicit depth limit and path collection for visualization
+**Description:** Extend Option 1 by returning full path objects rather than just terminal nodes, and enforcing an explicit maximum depth. The full path is used to build an edge list for graph visualization in the UI (ADR-010).
 
-```
-void dfs(String nodeId, Set<String> visited) {
-    if (visited.contains(nodeId)) return;
-    visited.add(nodeId);
-    for (String neighbor : getDirectNeighbors(nodeId)) {
-        dfs(neighbor, visited);
-    }
-}
+```cypher
+MATCH path = (s:Service {name: $name})-[:DEPENDS_ON*1..15]->(dep:Service)
+WITH dep, path, length(path) AS depth
+RETURN DISTINCT dep, depth,
+       [r IN relationships(path) | {from: startNode(r).name, to: endNode(r).name}] AS edges
+ORDER BY depth
 ```
 
 **Advantages:**
-- Very concise code — the recursive form is intuitive
-- Produces a DFS ordering which can be useful for topological sort use cases
-- Same cycle safety as BFS when a visited set is maintained
+- Returns both nodes and the edges between them in one query — the UI can render the full subgraph without additional requests
+- Explicit depth limit (`*1..15`) prevents runaway queries on unexpectedly large graphs
+- Depth information enables blast-radius tier rendering in the UI
 
 **Trade-offs:**
-- Recursive calls consume JVM stack space; a graph with depth > ~500 edges will cause `StackOverflowError`
-- Harder to extract level/distance information compared to BFS
-- Iterative DFS (using an explicit stack) is safer but less natural to read
+- More complex Cypher — path manipulation (`relationships(path)`, `startNode`, `endNode`) requires Cypher familiarity
+- Returns more data per query than necessary for a simple "list all affected services" use case
+- Path deduplication is more demanding with cycles allowed: a cyclic graph produces an unbounded number of distinct paths to the same target node; the depth limit (`*1..15`) is a mandatory termination guard, not a performance hint — without it, the query cannot guarantee termination on a graph with cycles
 
-**Pick when:** Graph depth is provably shallow (< 100 hops), or a topological ordering of results is needed.
-
----
-
-### Option 3: Database-side recursive CTE (`WITH RECURSIVE`)
-**Description:** Express the full transitive closure query directly in SQL using a recursive Common Table Expression. Both H2 and PostgreSQL support `WITH RECURSIVE`. The query starts from the given node and recursively joins the `dependencies` table until no new rows are found.
-
-```sql
-WITH RECURSIVE downstream AS (
-  SELECT to_service_id AS id FROM dependencies WHERE from_service_id = :startId
-  UNION
-  SELECT d.to_service_id FROM dependencies d
-  JOIN downstream ds ON d.from_service_id = ds.id
-)
-SELECT s.* FROM services s JOIN downstream ds ON s.id = ds.id;
-```
-
-**Advantages:**
-- Single database round-trip returns all transitive results — no N+1 query problem
-- The database query planner can optimize the recursive join
-- H2 and PostgreSQL both support this syntax, so it works in both development and production
-
-**Trade-offs:**
-- H2's `WITH RECURSIVE` behavior for cycles may differ from PostgreSQL (H2 may loop without a cycle guard depending on version)
-- Cycle handling requires adding `WHERE NOT EXISTS` guards or depth limits, which significantly increases query complexity
-- SQL is harder to unit test than Java logic
-- Couples the traversal logic to the SQL dialect, complicating future database migration
-
-**Pick when:** The database is PostgreSQL in production, graph sizes are large enough that multiple round-trips are a measurable bottleneck, and the team is comfortable writing and testing recursive SQL.
+**Pick when:** The UI requires a full edge list to render the dependency subgraph (not just a flat node list), and the team is comfortable with Cypher path queries. A strong candidate for the visualization endpoint specifically.
 
 ## Recommendation
-**Option 1: Iterative BFS with a visited set.** It is safe against cycles, does not risk stack overflow, returns results in a meaningful level-order, and is trivially unit-testable as pure Java. At the expected scale (hundreds to thousands of services), loading all direct neighbors per hop involves at most a few hundred small queries — well within sub-second performance.
+**Option 1: Cypher variable-length path query** as the primary traversal implementation, with **Option 3** used for the graph visualization endpoint that feeds the UI. Pushing traversal to Neo4j is idiomatic, eliminates N+1 round-trips, and produces accurate hop-depth information useful for blast-radius tiering — all with less code than the application-side BFS alternative.
 
 ## Consequences
-**If accepted:** Implement a `GraphTraversalService` that accepts a start node ID and a direction enum (`UPSTREAM` / `DOWNSTREAM`), and returns an ordered `List<ServiceDTO>` or a `Set<String>` of reachable service IDs. The service is injected with the `DependencyRepository` and has no direct HTTP coupling. The traversal logic is fully unit-testable by mocking the repository.
+**If accepted:** Define two `@Query`-annotated methods on `ServiceRepository`:
+- `findAllDownstream(String name)` — variable-length OUTGOING traversal returning `List<ServiceNode>` with depth
+- `findAllUpstream(String name)` — variable-length INCOMING traversal
+- `findSubgraphEdges(String name)` — path-collecting variant for the visualization endpoint
 
-**Watch out for:** The BFS will issue one `SELECT` per hop level if neighbors are loaded lazily. For large graphs, consider loading all edges into memory at traversal start (single query) and building an in-memory adjacency map for the traversal, then discarding it after the request completes. This trades memory for query count.
+Add a depth upper bound of `*1..50` to all variable-length path queries. With cycles allowed (ADR-006), this bound is a correctness requirement — it guarantees query termination — not merely a performance hint. Expose it as a configurable property (`tracker.traversal.max-depth=50`) so it can be tuned without a code change.
+
+**Watch out for:** `@Query` methods on SDN repositories that return custom projections (depth + node) require a `@QueryResult` DTO or a custom `Map<String, Object>` return type — SDN cannot automatically map Cypher `RETURN dep, depth` to a standard `@Node` class. Define a `ServiceWithDepthDTO` record for this purpose.

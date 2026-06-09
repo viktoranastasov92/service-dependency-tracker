@@ -1,7 +1,7 @@
 # ADR-014: Service Identity and Naming
 
 ## Status
-Proposed
+Accepted — Option 1: Human-readable kebab-case slugs as the external identifier
 
 ## Context
 Every service registered in the system must have a unique identity used in API paths, dependency edges, and query results. The choice between human-readable names as identifiers versus generated UUIDs has significant implications for API usability, URL design, and data integrity. On-call engineers querying the API under pressure need identifiers they can type and remember.

@@ -1,7 +1,7 @@
 # ADR-003: Persistence Strategy
 
 ## Status
-Proposed
+Accepted — Option 5: Neo4j
 
 ## Context
 The system maintains a registry of services and a directed graph of dependency edges between them. The storage layer must support CRUD on nodes and edges, directed traversal in both directions (upstream / downstream), cycle detection on every write, and the ability to query the full transitive closure of any given node. The data volume is modest (hundreds to low thousands of services) but the access pattern is graph-shaped, which is a genuine differentiator between storage categories. This ADR considers relational, document, and native graph options.
