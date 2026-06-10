@@ -2,6 +2,10 @@
 
 A tool for on-call engineers to register microservices, define dependency edges between them, and query the full upstream/downstream chain of any service to assess blast radius during incidents.
 
+## Implementation Note
+
+This project was implemented entirely using [Claude Code](https://claude.ai/code) with the **Claude Sonnet** model. The prompts used throughout the implementation are recorded in [PROMPTS-HISTORY.md](PROMPTS-HISTORY.md) — new joiners can read through them to understand the sequence of steps taken to build the project from scratch.
+
 ## Tech Stack
 
 | Layer | Technology |
