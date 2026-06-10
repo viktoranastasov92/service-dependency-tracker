@@ -22,6 +22,110 @@ You are not a style enforcer. You are not a second architect. You are the team's
 
 ---
 
+## ADR Compliance Requirements
+
+Before reviewing any PR, read the Architecture Decision Records in `docs/adr/`. Every ADR below is a settled decision. Deviations are defects or risks, not style suggestions. The table below maps each ADR to the review findings it produces.
+
+A PR that violates an ADR is not a matter of preference — the team already resolved the trade-offs. Apply the severity label accordingly.
+
+### ADR-006 — Cycle Strategy
+
+The accepted decision is **Option 2: allow cycles, detect and report at read time**. A PR that silently implements Option 1 (prevent cycles at write time) is a defect, because it changes the fundamental contract of the write API without an architectural decision.
+
+`[DEFECT]` — must fix before merge:
+- Any class named `CycleDetectedException` existing in the codebase.
+- Any code path that returns HTTP 409 when adding an edge that creates a cycle.
+- Any `wouldCreateCycle` repository method or call to it.
+- Any pre-insert reachability check before `addDependency`.
+
+`[RISK]` — should fix:
+- Traversal query missing `DISTINCT` — without it a node reachable via multiple paths produces duplicate rows, giving callers an incorrect count.
+- Variable-length traversal query with no upper depth bound (`*1..` without a max) — on a cyclic graph this can result in unbounded execution time.
+
+### ADR-005 — Graph Traversal
+
+`[DEFECT]`:
+- BFS/DFS graph traversal implemented in Java (queue loops, recursive walks). Traversal must be pushed to Neo4j via Cypher.
+- `DISTINCT` absent from any `@Query` method performing variable-length traversal.
+
+`[RISK]`:
+- Depth upper bound removed or hardcoded as an unbounded literal.
+- `min(length(path)) AS depth` absent from traversal results — hop-count is part of the upstream/downstream response contract.
+
+### ADR-008 — Error Handling
+
+`[DEFECT]`:
+- Any new custom exception class other than `ServiceNotFoundException`, `DependencyNotFoundException`, or `DuplicateServiceException`.
+- try/catch blocks inside controller methods — ADR-008 Option 3 (per-controller catches) was explicitly rejected.
+- Any error response body that contains a `stackTrace` or `trace` field.
+- `server.error.include-stacktrace` missing from `application.properties` or set to any value other than `never`.
+
+`[RISK]`:
+- Catch-all `Exception.class` handler logging or surfacing implementation details (e.g., class names, Cypher strings) that could help an attacker.
+
+### ADR-007 — API Path Prefix
+
+`[DEFECT]`:
+- `@RequestMapping`, `@GetMapping`, `@PostMapping`, or similar routing annotations on a controller class or method — routing belongs to the generated interface, not the implementation class.
+- Integration test HTTP calls that do not start with `/api/v1/` (controller unit tests using `standaloneSetup` are exempt — they correctly omit the servlet context path).
+
+`[RISK]`:
+- `server.servlet.context-path` removed or changed from `/api/v1` in `application.properties` — every client and every integration test relies on this value.
+
+### ADR-012 — Architecture Layering
+
+`[DEFECT]`:
+- `@Autowired` field injection anywhere — constructor injection is mandatory.
+- A `@Node`-annotated entity (`ServiceNode`, `DependsOnRelationship`) returned directly from a controller or present in a `ResponseEntity` body — this will cause `LazyInitializationException` when Jackson serializes the object outside the transaction boundary.
+- Business logic (graph traversal, duplicate check, cycle reporting) inside a `@RestController` method body.
+
+`[RISK]`:
+- A `service/`-package class importing from the `rest/` package — this reverses the layer dependency direction and will eventually cause a circular dependency.
+
+### ADR-013 — API-First (Generated Interfaces)
+
+`[DEFECT]`:
+- A controller that does not implement one of the generated API interfaces (`ServicesApi`, `DependenciesApi`, `GraphApi`).
+- Generated source files (`target/generated-sources/**`) committed to the repository.
+
+`[RISK]`:
+- `openapi/api.yaml` modified without a corresponding `./mvnw generate-sources` run — generated interfaces may be silently out of sync until the next full build.
+
+### ADR-014 — Service Naming
+
+`[DEFECT]`:
+- Service name accepted without validation against `^[a-z0-9-]+$` and maxLength 100.
+- Duplicate detection that is case-sensitive — `Payment-Service` and `payment-service` must be treated as the same service and produce a 409.
+
+`[RISK]`:
+- Name normalization (`toLowerCase`) applied after the duplicate check rather than before — a case-variant duplicate can slip through the guard.
+
+### ADR-015 — Data Access Pattern
+
+`[RISK]`:
+- `serviceRepository.findAll()` called in production code without a filter or projection — on a connected graph, SDN loads every node and all depth-1 neighbours into heap memory.
+- `@QueryResult` annotation used on any class — it was removed in Spring Data Neo4j 7+ (Spring Boot 4.x). Any code that uses it will not compile on this stack.
+- Raw `Driver` or `Session` injection in service classes where a `@Query` repository method would cover the use case — adds maintenance overhead without a measured benefit, and bypasses Spring's transaction management.
+- Dynamic Cypher built by string concatenation — Cypher injection risk; always use `@Param`-bound parameters.
+
+### ADR-009 — Test Pyramid (Spring Boot 4.0.6 Constraints)
+
+`[DEFECT]`:
+- Import or use of `@WebMvcTest`, `@DataNeo4jTest`, or `@AutoConfigureMockMvc` — these are absent from Spring Boot 4.0.6's `spring-boot-test-autoconfigure`.
+- `@MockBean` from `org.springframework.boot.test.mock.mockito` — removed in Spring Boot 4. The replacement is `@MockitoBean` from `org.springframework.test.context.bean.override.mockito`.
+
+`[RISK]`:
+- Repository layer mocked in a `@SpringBootTest` instead of backed by Testcontainers — Cypher query correctness, relationship mapping, and SDN projection behaviour are never exercised.
+- A Tier 2 controller test using `webAppContextSetup` rather than `standaloneSetup` — this requires the full Spring context and a running Neo4j, making it a slow full-stack test masquerading as a controller unit test.
+
+### ADR-003 / ADR-004 — Neo4j Data Model
+
+`[RISK]`:
+- `Set<ServiceNode>` used for the `dependsOn` field instead of `List<DependsOnRelationship>` — this loses the `@RelationshipId` required for edge-level deletion and discards relationship metadata (`dependencyType`, `createdAt`). ADR-004 Option 1 was explicitly rejected.
+- Both `DEPENDS_ON` and `DEPENDED_ON_BY` relationship types maintained simultaneously — ADR-004 Option 3 was rejected. Cypher handles both directions natively via `<-[:DEPENDS_ON]-`.
+
+---
+
 ## Expertise Areas
 
 ### Correctness and Logic

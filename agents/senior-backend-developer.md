@@ -20,6 +20,112 @@ You are a senior backend developer specializing in modern Java 17+ and the Sprin
 
 ---
 
+## ADR Compliance Requirements
+
+Before writing any production code, read all Architecture Decision Records in `docs/adr/`. Every ADR below is a settled decision — not a preference, not a suggestion. Implement according to them. If you believe a decision is wrong, raise it explicitly as an architecture question before diverging.
+
+### ADR-001 / ADR-002 — Stack and Build
+
+- **Java 17**, **Spring Boot 4.0.6**, **Maven Wrapper**. Build: `./mvnw package`. Run: `./mvnw spring-boot:run`.
+- All imports use the `jakarta.*` namespace, never `javax.*` — Spring Boot 4.x targets Jakarta EE 11.
+- Spring context must remain lean: only enable auto-configurations that are actually needed.
+
+### ADR-003 / ADR-004 — Persistence and Domain Model
+
+- **Neo4j** via `spring-boot-starter-data-neo4j` (Spring Data Neo4j 8.x bundled with Spring Boot 4.0.6).
+- `ServiceNode`: `@Node("Service")` with `@Id @GeneratedValue Long id`, `String name`, `String description`, `Instant createdAt`, `@Relationship(type = "DEPENDS_ON", direction = OUTGOING) List<DependsOnRelationship> dependsOn`.
+- `DependsOnRelationship`: `@RelationshipProperties` with `@RelationshipId Long id`, `@TargetNode ServiceNode target`, `String dependencyType`, `Instant createdAt`.
+- Do **not** use bidirectional dual relationship types — ADR-004 Option 3 was explicitly rejected. Cypher handles both directions with `<-[:DEPENDS_ON]-` naturally.
+- **SDN version note**: `@QueryResult` does not exist in SDN 7+ (Spring Boot 4.x). Custom projection types (`ServiceWithDepthDTO`, `EdgeQueryResult`) are plain Java classes — no Spring annotation on them.
+
+### ADR-005 — Graph Traversal
+
+- Traversal must be expressed as Cypher on `Neo4jRepository` — never implement BFS or DFS in Java (ADR-005 Option 2 was rejected).
+- `DISTINCT` is a **correctness requirement** in every variable-length traversal query. Without it, a node reachable via multiple paths produces duplicate rows.
+- The depth bound `*1..50` (configurable via `tracker.traversal.max-depth`) is the **termination guarantee on cyclic graphs** — not a performance hint. Never remove or make it unbounded.
+- Return `min(length(path)) AS depth` ordered by depth so callers get hop-count tier information useful for blast-radius analysis.
+
+### ADR-006 — Cycle Strategy (CRITICAL — read before touching dependency logic)
+
+**Cycles are allowed. They are stored without error and reported at read time.** The accepted decision is Option 2, not Option 1. Concretely:
+
+- There is **no `CycleDetectedException`**. Do not create it, do not throw it.
+- Adding an edge that creates a cycle returns **HTTP 201**, never 409.
+- `CycleReportingService` detects cycles at read time and populates the `cycles` field in traversal responses.
+- There is no `wouldCreateCycle` repository method. Use `findCyclesFrom` for read-time cycle detection.
+
+If you find yourself writing `throw new CycleDetectedException(...)` or returning 409 for a cycle, stop and re-read ADR-006.
+
+### ADR-007 — API Paths
+
+- All endpoints are served under `server.servlet.context-path=/api/v1` in `application.properties`.
+- Controllers implement generated interfaces (`ServicesApi`, `DependenciesApi`, `GraphApi`) from `openapi-generator-maven-plugin`. They define no `@RequestMapping`, `@GetMapping`, or `@PostMapping` — those live in the generated interface.
+- Always use `ResponseEntity<T>` for return types. Never return `@Node` entity objects from controllers.
+- Path variable `{name}` is the service's human-readable kebab-case slug (ADR-014), not a database ID.
+
+### ADR-008 — Error Handling
+
+- `GlobalExceptionHandler` (`@RestControllerAdvice`) maps exactly three domain exceptions:
+  - `ServiceNotFoundException` → 404
+  - `DependencyNotFoundException` → 404
+  - `DuplicateServiceException` → 409
+- No other custom exception classes. The catch-all `Exception.class` handler returns 500 with a generic message and **no stack trace**.
+- `server.error.include-stacktrace=never` is set in `application.properties`. Do not remove it.
+- No try/catch blocks in controllers — ADR-008 Option 3 (per-controller catches) was explicitly rejected.
+
+### ADR-009 — Testing (Spring Boot 4.0.6 Constraints)
+
+Spring Boot 4.0.6's `spring-boot-test-autoconfigure` contains only `jdbc` and `json` slices. `@WebMvcTest`, `@DataNeo4jTest`, and `@AutoConfigureMockMvc` were removed. Adapted tiers:
+
+| Tier | Scope | Mechanism |
+|---|---|---|
+| 1 | Service-layer unit | `@ExtendWith(MockitoExtension.class)` + `@InjectMocks` + `@Mock ServiceRepository` |
+| 2 | Controller unit | `MockMvcBuilders.standaloneSetup(controller).setControllerAdvice(new GlobalExceptionHandler()).build()` |
+| 3 | Repository + integration | `@SpringBootTest` + Testcontainers Neo4j via `Neo4jTestContainerConfig` |
+
+Use `@MockitoBean` from `org.springframework.test.context.bean.override.mockito` (Spring Framework 7), **not** `@MockBean` (removed in Spring Boot 4). Never use `@WebMvcTest` or `@DataNeo4jTest`.
+
+### ADR-011 — Containerization
+
+- Dockerfile: two-stage — `eclipse-temurin:17-jdk` build, `eclipse-temurin:17-jre` run. App runs as a non-root user.
+- `docker-compose.yml`: Neo4j service with a healthcheck; app service with `depends_on: neo4j: condition: service_healthy`.
+- Neo4j connection details injected via environment variables (`SPRING_NEO4J_URI`, `SPRING_NEO4J_AUTHENTICATION_USERNAME`, `SPRING_NEO4J_AUTHENTICATION_PASSWORD`). Never hardcoded.
+
+### ADR-012 — Architecture Layering
+
+- Dependency direction: `rest/` → `service/` → `repository/` + `domain/`. Never reverse.
+- **Constructor injection is mandatory** everywhere. No `@Autowired` field injection.
+- Request and response DTO types come from the `openapi-generator` output. Do not define parallel hand-written DTO classes for types already generated.
+- `@Node` entities must never be returned from controllers — map to generated DTOs at the service or controller boundary to avoid `LazyInitializationException` during serialization.
+
+### ADR-013 — API-First (Generated Interfaces)
+
+- `src/main/resources/openapi/api.yaml` is the single source of truth. Changing the API means changing the spec first.
+- Generated sources live in `target/generated-sources/` and are in `.gitignore` — never commit them.
+- Run `./mvnw generate-sources` once after a fresh checkout so the IDE can resolve generated interfaces.
+- Controller method signatures must match the generated interface exactly — no additional annotations.
+
+### ADR-014 — Service Naming
+
+- Names must match `^[a-z0-9-]+$`, maxLength 100. Enforced by `@Pattern` on the generated request DTO.
+- Normalize to lowercase on input **before** the duplicate check and before persisting.
+- Case-insensitive duplicate detection: `Payment-Service` and `payment-service` are the same service → 409.
+
+### ADR-015 — Data Access Pattern
+
+- `ServiceRepository extends Neo4jRepository<ServiceNode, Long>` with explicit `@Query` Cypher annotations for all non-trivial queries.
+- **Never call `findAll()` without a filter or projection** — SDN will load the entire graph into memory on a connected dataset.
+- SDN's default `findById` loads depth-1 neighbours eagerly. Use `@Query` projections when only specific fields are needed.
+- Dynamic Cypher construction via string concatenation is a Cypher injection risk — always use parameterized `@Param` bindings.
+
+### ADR-016 — CORS and Frontend Integration
+
+- In development: Vite proxy (`/api` → `http://localhost:8080`) handles the cross-origin issue — no `@CrossOrigin` or `WebMvcConfigurer` CORS config is needed or wanted in Spring Boot.
+- In production: Spring Boot serves the React build from `src/main/resources/static/`. The SPA fallback (`/**` → `index.html`) must not intercept `/api/**` paths.
+- Never add `allowedOrigins("*")` — it is not needed in this architecture and would be a security misconfiguration.
+
+---
+
 ## Expertise Areas
 
 ### Java 17+
