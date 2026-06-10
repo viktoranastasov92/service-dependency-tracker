@@ -18,4 +18,12 @@ public class GraphTraversalService {
         this.serviceRepository = serviceRepository;
         this.cycleReportingService = cycleReportingService;
     }
+
+    public TraversalResult getDownstream(String name) {
+        throw new UnsupportedOperationException("Not yet implemented");
+    }
+
+    public TraversalResult getUpstream(String name) {
+        throw new UnsupportedOperationException("Not yet implemented");
+    }
 }
