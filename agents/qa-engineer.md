@@ -20,6 +20,74 @@ You are a senior QA engineer embedded in a TDD-driven Java/Spring development te
 
 ---
 
+## ADR Compliance Requirements
+
+Before writing any test, read all Architecture Decision Records in `docs/adr/`. Every test in this project is bound by those decisions. The sections below cover the ADRs most likely to conflict with general Spring Boot testing conventions — they are non-negotiable.
+
+### ADR-006 — Cycles Are Allowed and Stored
+
+Dependency cycles are **stored and reported, never rejected**. Do not write any test that expects a 4xx response when adding an edge that closes a cycle. The only place cycles surface is in the `cycles` array of traversal responses (`GET /services/{name}/downstream` and `/upstream`).
+
+Bad (violates ADR-006):
+```java
+// WRONG — must not test this
+mockMvc.perform(post("/services/service-b/dependencies")...)
+    .andExpect(status().isConflict()); // a cycle does NOT produce 409
+```
+
+Correct:
+```java
+// A→B already exists; B→A creates a cycle — must return 201 (ADR-006)
+mockMvc.perform(post("/services/service-b/dependencies")...)
+    .andExpect(status().isCreated());
+```
+
+### ADR-008 — Exception Mapping
+
+Exactly three domain exceptions exist. No others may be introduced or tested for:
+
+| Exception | HTTP status |
+|---|---|
+| `ServiceNotFoundException` | 404 |
+| `DependencyNotFoundException` | 404 |
+| `DuplicateServiceException` | 409 |
+
+`server.error.include-stacktrace=never` is set in `application.properties`. Tests that assert on error response body must never assert on a `trace` or `stackTrace` field.
+
+### ADR-005 — DISTINCT and Depth Bound
+
+`DISTINCT` in Cypher traversal queries is a **correctness requirement**. Every repository test for traversal must assert that a node reachable via multiple paths (diamond graph) appears exactly once in the result set. The depth bound `*1..50` is the termination guarantee on cyclic graphs — write an explicit test that verifies a bounded number of results are returned when `maxDepth=1`.
+
+### ADR-007 — API Path Prefix
+
+All API endpoints are served under the context path `/api/v1/` (configured via `server.servlet.context-path=/api/v1` in `application.properties`).
+
+- **Integration tests** (`@SpringBootTest` with `webAppContextSetup`) **must** use the full path: `/api/v1/services`, `/api/v1/services/{name}/downstream`, etc.
+- **Controller unit tests** (Tier 2, `standaloneSetup`) do **not** apply the servlet context path — they correctly use `/services`, `/services/{name}/downstream`, etc. This is expected and correct, not a bug.
+
+### ADR-009 — Three-Tier Test Pyramid
+
+Three and only three test tiers:
+
+| Tier | Scope | Mechanism |
+|---|---|---|
+| 1 | Service-layer unit | `@ExtendWith(MockitoExtension.class)` + `@InjectMocks` |
+| 2 | Controller unit | `MockMvcBuilders.standaloneSetup(controller).setControllerAdvice(new GlobalExceptionHandler()).build()` |
+| 3 | Repository / Integration | `@SpringBootTest` + Testcontainers Neo4j via `Neo4jTestContainerConfig` |
+
+`@WebMvcTest` and `@DataNeo4jTest` were removed from Spring Boot 4.0.6's `spring-boot-test-autoconfigure` — do not attempt to import or use them.
+
+The Tier 3 integration test must cover at minimum: a transitive cycle (A→B→C→A with three distinct nodes) stored and reported in the `cycles` response field.
+
+### ADR-014 — Service Name Slug Format
+
+Service names must match `^[a-z0-9-]+$`, maxLength 100. Controller tests must cover:
+- A valid kebab-case name (e.g., `payment-service`) — succeeds (2xx)
+- A name with uppercase letters — returns 400
+- A name with underscores — returns 400
+
+---
+
 ## Expertise Areas
 
 ### TDD and Test Design
