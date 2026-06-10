@@ -75,3 +75,7 @@
 - Run a simple end-to-end test to verify functionality of frontend <-> backend services
 
 - Create a README.md file with clear instructions on how to build, run, and test the application
+
+- Enhance README.md file with a section for the remaining work like security specifics -
+  authentication and authorization, https/tls, rate limiting and similar ones that you can think
+  of. Also - observability, testing, deployment (ci/cd) and other specifics you can think of

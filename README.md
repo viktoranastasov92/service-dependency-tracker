@@ -249,3 +249,54 @@ Cycles are **stored, not rejected**. Adding an edge that creates a cycle returns
 | `SPRING_NEO4J_AUTHENTICATION_PASSWORD` | `password` | Neo4j password |
 
 The Docker Compose setup sets all three automatically.
+
+---
+
+## Remaining Work
+
+The items below are out of scope for this prototype but required before the system could be considered production-ready.
+
+### Security
+
+- **Authentication & authorisation** — the API is currently open with no authentication. Add Spring Security with OAuth2 / OpenID Connect (e.g. Keycloak, Auth0, or an internal IdP) so that every API request carries a verified identity. Introduce role-based access control: a read-only `viewer` role for on-call engineers querying blast radius, and a `maintainer` role for registering or deleting services and dependency edges.
+- **TLS / HTTPS** — traffic between the browser and the server and between the application and Neo4j is currently unencrypted. Terminate TLS at a reverse proxy (nginx, a cloud load balancer) in front of Spring Boot, and enable the Neo4j Bolt+TLS protocol (`bolt+s://`) for the database connection.
+- **Swagger UI protection** — the interactive API documentation at `/api/v1/swagger-ui.html` is publicly accessible. In production, restrict it to authenticated users or disable it entirely via `springdoc.swagger-ui.enabled=false` behind an environment flag.
+- **Rate limiting** — the API has no rate limiting. A malicious or misconfigured client could flood the traversal endpoints with deep queries. Add a rate-limiting filter (Spring Cloud Gateway, Bucket4j, or a reverse-proxy policy) and cap individual request depth via the `tracker.traversal.max-depth` property.
+- **Secrets management** — Neo4j credentials are currently passed as plain-text environment variables. In a production deployment, source secrets from a dedicated secrets manager (HashiCorp Vault, AWS Secrets Manager, Kubernetes Secrets with encryption at rest) and rotate them on a schedule.
+- **Audit logging** — there is no record of who registered, modified, or deleted a service or dependency edge. Add a structured audit log (who, what, when, from which IP) written to a separate append-only sink so changes can be reviewed after an incident.
+- **Input sanitisation hardening** — service names are validated against `^[a-z0-9-]+$`. Review all other free-text inputs (description field) for maximum length enforcement and ensure they are never interpolated into Cypher outside of parameterised queries.
+
+### Observability
+
+- **Metrics** — add Spring Boot Actuator and Micrometer with a Prometheus scrape endpoint (`/actuator/prometheus`). Expose custom metrics: traversal query duration, cycle detection count, number of registered services, and dependency edge count.
+- **Distributed tracing** — integrate OpenTelemetry (Micrometer Tracing + an OTLP exporter) to produce trace spans for each API request, including the Neo4j Cypher execution time. Export to Jaeger, Zipkin, or a cloud APM (Datadog, Honeycomb).
+- **Structured logging** — switch from plain-text log lines to structured JSON (Logback with `logstash-logback-encoder`) so logs are parseable by log aggregation tools (ELK stack, Loki, CloudWatch Logs Insights).
+- **Health checks** — expose a detailed `/actuator/health` endpoint that includes Neo4j connectivity status, and wire it into the Docker Compose `healthcheck` for the application container (currently only Neo4j has one).
+
+### API & Data Model
+
+- **Service update endpoint** — there is no `PATCH /services/{name}` endpoint to update a service's description after registration. Add one.
+- **Pagination on `GET /services`** — the list-all endpoint returns every service in one response. Add cursor- or page-based pagination before the service registry grows large.
+- **Per-request depth override** — the traversal depth cap (`tracker.traversal.max-depth`) is a server-wide setting. Expose an optional `?maxDepth=N` query parameter on the downstream and upstream endpoints so callers can request a shallower traversal for low-latency use cases.
+- **Bulk import endpoint** — provide a `POST /import` endpoint that accepts a JSON graph (services + edges) and loads it transactionally, for migrating an existing registry or seeding from a configuration file.
+- **API versioning strategy** — the current `/api/v1/` prefix reserves the option for a `v2` but there is no documented strategy for introducing breaking changes. Define a deprecation and migration policy before the first external consumer is onboarded.
+
+### Testing
+
+- **Frontend unit & component tests** — there are no automated tests for the React application. Add Vitest + React Testing Library for component logic and API client tests.
+- **End-to-end browser tests** — add Playwright or Cypress tests that drive the full UI against a running backend to catch regressions in the graph visualisation and form interactions.
+- **Performance tests** — verify traversal query performance at realistic graph sizes (1 000+ services, 5 000+ edges) with a load test (k6, Gatling) targeting the downstream and upstream endpoints.
+- **Security scanning** — integrate OWASP Dependency-Check into the Maven build to surface known CVEs in third-party dependencies. Add a SAST scan (SpotBugs, Semgrep) to the CI pipeline.
+
+### CI / CD
+
+- **CI pipeline** — there is no continuous integration pipeline. Add a GitHub Actions (or equivalent) workflow that runs on every pull request: compile, run all three test tiers (Testcontainers requires a Docker daemon in the runner), and report coverage.
+- **Container image publishing** — the Dockerfile is present but no pipeline publishes images to a container registry. Add a CD step that builds, tags, and pushes the image on merge to main.
+- **Infrastructure as code** — the Docker Compose file is suitable for local development only. For a real deployment, define the infrastructure (Kubernetes manifests, Helm chart, or a cloud-provider IaC template) so environments are reproducible and version-controlled.
+
+### Neo4j Production Concerns
+
+- **Neo4j authentication** — the Docker Compose configuration uses `NEO4J_AUTH: neo4j/trackerpassword`. Production instances must use a strong, rotated password sourced from a secrets manager.
+- **Backup & recovery** — there is no backup strategy for the Neo4j data volume. Define a backup schedule (Neo4j's `neo4j-admin dump` or a cloud snapshot) and test the restore procedure.
+- **Neo4j clustering / high availability** — the current setup is a single Neo4j instance with no replication. For a production deployment that must survive node failures, use Neo4j's Causal Cluster or Aura Enterprise.
+- **Database schema constraints** — the Neo4j schema relies on application-level uniqueness enforcement (duplicate service name → 409 from the service layer). Add a native Neo4j uniqueness constraint (`CREATE CONSTRAINT FOR (s:Service) REQUIRE s.name IS UNIQUE`) so the guarantee holds even if the database is written to directly outside the application.
