@@ -28,6 +28,9 @@
 	</scm>
 	<properties>
 		<java.version>17</java.version>
+		<openapi-generator.version>7.10.0</openapi-generator.version>
+		<springdoc.version>2.8.6</springdoc.version>
+		<swagger-annotations.version>2.2.25</swagger-annotations.version>
 	</properties>
 	<dependencies>
 		<dependency>
@@ -38,6 +41,26 @@
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-web</artifactId>
+		</dependency>
+
+		<!-- Enables @Valid on generated controller method parameters -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-validation</artifactId>
+		</dependency>
+
+		<!-- Swagger / OpenAPI annotations used by the generated interfaces -->
+		<dependency>
+			<groupId>io.swagger.core.v3</groupId>
+			<artifactId>swagger-annotations</artifactId>
+			<version>${swagger-annotations.version}</version>
+		</dependency>
+
+		<!-- Serves api.yaml as interactive Swagger UI at /swagger-ui.html -->
+		<dependency>
+			<groupId>org.springdoc</groupId>
+			<artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+			<version>${springdoc.version}</version>
 		</dependency>
 
 		<dependency>
@@ -52,6 +75,43 @@
 			<plugin>
 				<groupId>org.springframework.boot</groupId>
 				<artifactId>spring-boot-maven-plugin</artifactId>
+			</plugin>
+
+			<plugin>
+				<groupId>org.openapitools</groupId>
+				<artifactId>openapi-generator-maven-plugin</artifactId>
+				<version>${openapi-generator.version}</version>
+				<executions>
+					<execution>
+						<goals>
+							<goal>generate</goal>
+						</goals>
+						<configuration>
+							<inputSpec>src/main/resources/openapi/api.yaml</inputSpec>
+							<generatorName>spring</generatorName>
+							<apiPackage>com.example.service_dependency_tracker.rest.generated</apiPackage>
+							<modelPackage>com.example.service_dependency_tracker.rest.dto</modelPackage>
+							<generateApiTests>false</generateApiTests>
+							<generateModelTests>false</generateModelTests>
+							<generateApiDocumentation>false</generateApiDocumentation>
+							<generateModelDocumentation>false</generateModelDocumentation>
+							<configOptions>
+								<!-- Generate interfaces only — controllers implement them, nothing is instantiated -->
+								<interfaceOnly>true</interfaceOnly>
+								<!-- Jakarta EE namespace (required for Spring Boot 3+/4+) -->
+								<useSpringBoot3>true</useSpringBoot3>
+								<!-- Group generated interfaces by OpenAPI tag (ServicesApi, DependenciesApi, GraphApi) -->
+								<useTags>true</useTags>
+								<!-- Avoid jackson-databind-nullable dependency -->
+								<openApiNullable>false</openApiNullable>
+								<!-- Use java.time types (Instant / OffsetDateTime) instead of org.joda -->
+								<dateLibrary>java8</dateLibrary>
+								<!-- Do not wrap return types in ResponseEntity inside the interface -->
+								<skipDefaultInterface>false</skipDefaultInterface>
+							</configOptions>
+						</configuration>
+					</execution>
+				</executions>
 			</plugin>
 		</plugins>
 	</build>

@@ -1,0 +1,498 @@
+openapi: 3.1.0
+
+info:
+  title: Service Dependency Tracker API
+  version: 1.0.0
+  description: |
+    Centralized API for tracking and querying directed dependency graphs between microservices.
+    On-call engineers can register services, define dependencies between them, and query the full
+    upstream or downstream dependency chain of any given service to quickly assess blast radius
+    during incidents.
+
+    ## Key Concepts
+    - **Service**: A named node in the dependency graph, identified by a unique kebab-case slug
+      (e.g. `payment-service`). Slugs are the stable external identifier used in all API paths and responses.
+    - **Dependency**: A directed edge meaning "this service depends on that service".
+      Edges carry a `dependencyType` (RUNTIME, BUILD, OPTIONAL) recorded on the relationship.
+    - **Downstream**: All services that a given service transitively depends on.
+    - **Upstream**: All services that transitively depend on a given service — its blast radius.
+    - **Cycles**: Circular dependency chains are permitted. When detected, they are reported
+      in the `cycles` field of traversal responses rather than rejected at write time.
+
+servers:
+  - url: http://localhost:8080/api/v1
+    description: Local development
+
+tags:
+  - name: Services
+    description: Register and manage service nodes in the dependency graph
+  - name: Dependencies
+    description: Define and manage directed dependency edges between services
+  - name: Graph
+    description: Traverse the dependency graph to query upstream and downstream chains
+
+paths:
+
+  # ---------------------------------------------------------------------------
+  # Services
+  # ---------------------------------------------------------------------------
+
+  /services:
+    post:
+      tags: [Services]
+      operationId: registerService
+      summary: Register a new service
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterServiceRequest'
+            example:
+              name: payment-service
+              description: Handles all payment processing and transaction management
+      responses:
+        '201':
+          description: Service registered successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServiceDTO'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+    get:
+      tags: [Services]
+      operationId: listServices
+      summary: List all registered services
+      responses:
+        '200':
+          description: All registered services
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ServiceDTO'
+
+  /services/{name}:
+    parameters:
+      - $ref: '#/components/parameters/ServiceName'
+
+    get:
+      tags: [Services]
+      operationId: getService
+      summary: Get a service by name
+      responses:
+        '200':
+          description: Service found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServiceDTO'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags: [Services]
+      operationId: deleteService
+      summary: Delete a service and all its dependency edges
+      description: |
+        Removes the service node and cascade-deletes every dependency edge where this service
+        is either the source or the target. This operation is irreversible.
+      responses:
+        '204':
+          description: Service deleted successfully
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ---------------------------------------------------------------------------
+  # Dependencies
+  # ---------------------------------------------------------------------------
+
+  /services/{name}/dependencies:
+    parameters:
+      - $ref: '#/components/parameters/ServiceName'
+
+    post:
+      tags: [Dependencies]
+      operationId: addDependency
+      summary: Add a dependency from this service to another
+      description: |
+        Declares that the service identified by `{name}` depends on the service identified
+        by `dependsOnName`. Creates a directed edge: `{name}` → `dependsOnName`.
+
+        Cycles are permitted — if the proposed edge creates a cycle it will be stored and
+        reported in subsequent traversal responses. No `409` is returned for cycles.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddDependencyRequest'
+            example:
+              dependsOnName: user-auth-service
+              dependencyType: RUNTIME
+      responses:
+        '201':
+          description: Dependency added successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DependencyDTO'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+    get:
+      tags: [Dependencies]
+      operationId: getDirectDependencies
+      summary: List the direct dependencies of this service
+      description: |
+        Returns only the immediate (single-hop) services that this service depends on.
+        For the full transitive chain use `GET /services/{name}/downstream`.
+      responses:
+        '200':
+          description: Direct dependencies of the service
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DependencyDTO'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /services/{name}/dependencies/{depName}:
+    parameters:
+      - $ref: '#/components/parameters/ServiceName'
+      - name: depName
+        in: path
+        required: true
+        description: The name (slug) of the service that `{name}` currently depends on
+        schema:
+          type: string
+          pattern: '^[a-z0-9-]+$'
+          maxLength: 100
+        example: user-auth-service
+
+    delete:
+      tags: [Dependencies]
+      operationId: removeDependency
+      summary: Remove a dependency edge between two services
+      responses:
+        '204':
+          description: Dependency removed successfully
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ---------------------------------------------------------------------------
+  # Graph traversal
+  # ---------------------------------------------------------------------------
+
+  /services/{name}/downstream:
+    parameters:
+      - $ref: '#/components/parameters/ServiceName'
+
+    get:
+      tags: [Graph]
+      operationId: getDownstream
+      summary: Get the full downstream dependency chain
+      description: |
+        Returns all services that `{name}` transitively depends on, at any depth up to the
+        server's configured `max-depth` (default: 50 hops).
+
+        Each result includes the minimum hop count from `{name}` to that service.
+        The `edges` field contains the full edge list of the traversed subgraph, suitable
+        for rendering a graph visualization in the UI.
+
+        If cycles are present in the reachable subgraph they are listed in the `cycles` field
+        as ordered sequences of service names (last element equals the first).
+      responses:
+        '200':
+          description: Downstream dependency chain with optional cycle annotations
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TraversalResultDTO'
+              example:
+                origin: payment-service
+                services:
+                  - name: user-auth-service
+                    description: Handles authentication and authorisation
+                    depth: 1
+                  - name: postgres-primary
+                    description: Primary relational database
+                    depth: 2
+                edges:
+                  - from: payment-service
+                    to: user-auth-service
+                    dependencyType: RUNTIME
+                  - from: user-auth-service
+                    to: postgres-primary
+                    dependencyType: RUNTIME
+                cycles: []
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /services/{name}/upstream:
+    parameters:
+      - $ref: '#/components/parameters/ServiceName'
+
+    get:
+      tags: [Graph]
+      operationId: getUpstream
+      summary: Get the full upstream dependency chain (blast radius)
+      description: |
+        Returns all services that transitively depend on `{name}` — i.e. the blast radius
+        if `{name}` becomes unavailable. Each result includes the minimum hop count
+        from that service to `{name}`.
+
+        The `edges` field contains the full edge list of the traversed subgraph, suitable
+        for rendering a graph visualization in the UI.
+
+        If cycles are present in the reachable subgraph they are listed in the `cycles` field
+        as ordered sequences of service names (last element equals the first).
+      responses:
+        '200':
+          description: Upstream dependency chain with optional cycle annotations
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TraversalResultDTO'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+# ---------------------------------------------------------------------------
+# Components
+# ---------------------------------------------------------------------------
+
+components:
+
+  parameters:
+    ServiceName:
+      name: name
+      in: path
+      required: true
+      description: The unique kebab-case slug identifying the service (e.g. `payment-service`)
+      schema:
+        type: string
+        pattern: '^[a-z0-9-]+$'
+        maxLength: 100
+      example: payment-service
+
+  schemas:
+
+    RegisterServiceRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          pattern: '^[a-z0-9-]+$'
+          maxLength: 100
+          description: Unique kebab-case slug for the service; immutable after registration
+          example: payment-service
+        description:
+          type: string
+          maxLength: 500
+          description: Human-readable description of the service's purpose
+          example: Handles all payment processing and transaction management
+
+    AddDependencyRequest:
+      type: object
+      required: [dependsOnName]
+      properties:
+        dependsOnName:
+          type: string
+          pattern: '^[a-z0-9-]+$'
+          maxLength: 100
+          description: The name (slug) of the service this service depends on
+          example: user-auth-service
+        dependencyType:
+          $ref: '#/components/schemas/DependencyType'
+
+    ServiceDTO:
+      type: object
+      required: [name, createdAt]
+      properties:
+        name:
+          type: string
+          description: Unique kebab-case slug identifying the service
+          example: payment-service
+        description:
+          type: string
+          example: Handles all payment processing and transaction management
+        createdAt:
+          type: string
+          format: date-time
+          description: ISO-8601 timestamp of when the service was registered
+
+    DependencyDTO:
+      type: object
+      required: [fromService, toService, dependencyType, createdAt]
+      properties:
+        fromService:
+          type: string
+          description: The service that declares the dependency
+          example: payment-service
+        toService:
+          type: string
+          description: The service being depended on
+          example: user-auth-service
+        dependencyType:
+          $ref: '#/components/schemas/DependencyType'
+        createdAt:
+          type: string
+          format: date-time
+          description: ISO-8601 timestamp of when the dependency was registered
+
+    TraversalResultDTO:
+      type: object
+      required: [origin, services, edges, cycles]
+      properties:
+        origin:
+          type: string
+          description: The name of the service the traversal started from
+          example: payment-service
+        services:
+          type: array
+          description: All reachable services with their minimum hop distance from the origin
+          items:
+            $ref: '#/components/schemas/ServiceWithDepthDTO'
+        edges:
+          type: array
+          description: |
+            All dependency edges in the traversed subgraph. Provides the full edge list
+            needed by the UI graph visualization component.
+          items:
+            $ref: '#/components/schemas/EdgeDTO'
+        cycles:
+          type: array
+          description: |
+            Detected cycle paths in the reachable subgraph. Empty array if no cycles exist.
+            Each inner array is an ordered sequence of service names where the last element
+            equals the first, forming a closed loop.
+          items:
+            type: array
+            description: An ordered sequence of service names forming a single cycle
+            items:
+              type: string
+          example:
+            - [payment-service, fraud-detection-service, payment-service]
+
+    ServiceWithDepthDTO:
+      type: object
+      required: [name, depth]
+      properties:
+        name:
+          type: string
+          description: Unique kebab-case slug identifying the service
+          example: user-auth-service
+        description:
+          type: string
+          example: Handles authentication and authorisation
+        depth:
+          type: integer
+          minimum: 1
+          description: Minimum number of hops from the origin service to this service
+          example: 2
+        createdAt:
+          type: string
+          format: date-time
+
+    EdgeDTO:
+      type: object
+      required: [from, to, dependencyType]
+      properties:
+        from:
+          type: string
+          description: The service that declares the dependency
+          example: payment-service
+        to:
+          type: string
+          description: The service being depended on
+          example: user-auth-service
+        dependencyType:
+          $ref: '#/components/schemas/DependencyType'
+
+    DependencyType:
+      type: string
+      enum: [RUNTIME, BUILD, OPTIONAL]
+      default: RUNTIME
+      description: |
+        The nature of the dependency relationship:
+        - `RUNTIME`: The service requires this dependency to be available at runtime
+        - `BUILD`: The service requires this dependency only during the build phase
+        - `OPTIONAL`: The service can function without this dependency but uses it when available
+
+    ApiError:
+      type: object
+      required: [status, error, message, timestamp, path]
+      properties:
+        status:
+          type: integer
+          description: HTTP status code
+          example: 404
+        error:
+          type: string
+          description: Short error classification matching the HTTP status
+          example: Not Found
+        message:
+          type: string
+          description: Human-readable explanation of what went wrong
+          example: "Service 'payment-service' not found"
+        timestamp:
+          type: string
+          format: date-time
+          description: ISO-8601 timestamp of when the error occurred
+        path:
+          type: string
+          description: The request path that triggered the error
+          example: /api/v1/services/payment-service/downstream
+
+  responses:
+
+    NotFound:
+      description: The requested resource was not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            status: 404
+            error: Not Found
+            message: "Service 'payment-service' not found"
+            timestamp: '2026-06-10T10:00:00Z'
+            path: /api/v1/services/payment-service
+
+    Conflict:
+      description: The request conflicts with the current state of the resource
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            status: 409
+            error: Conflict
+            message: "Service 'payment-service' is already registered"
+            timestamp: '2026-06-10T10:00:00Z'
+            path: /api/v1/services
+
+    ValidationError:
+      description: The request body failed validation
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            status: 400
+            error: Bad Request
+            message: "name: must match '^[a-z0-9-]+$'"
+            timestamp: '2026-06-10T10:00:00Z'
+            path: /api/v1/services
