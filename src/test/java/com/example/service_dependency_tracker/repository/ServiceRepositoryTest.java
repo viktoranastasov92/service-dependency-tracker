@@ -218,7 +218,7 @@ class ServiceRepositoryTest extends Neo4jTestContainerConfig {
             payment.getDependsOn().add(new DependsOnRelationship(auth, "RUNTIME"));
             serviceRepository.save(payment);
 
-            List<List<String>> cycles = serviceRepository.findCyclesFrom("payment-service");
+            List<String> cycles = serviceRepository.findCyclesFrom("payment-service");
 
             assertThat(cycles).isEmpty();
         }
@@ -233,12 +233,13 @@ class ServiceRepositoryTest extends Neo4jTestContainerConfig {
             aFetched.getDependsOn().add(new DependsOnRelationship(b, "RUNTIME"));
             serviceRepository.save(aFetched);
 
-            List<List<String>> cycles = serviceRepository.findCyclesFrom("service-a");
+            List<String> cycles = serviceRepository.findCyclesFrom("service-a");
 
             assertThat(cycles).isNotEmpty();
-            assertThat(cycles).anySatisfy(cycle -> {
-                assertThat(cycle).contains("service-a");
-                assertThat(cycle.get(0)).isEqualTo(cycle.get(cycle.size() - 1));
+            assertThat(cycles).anySatisfy(cyclePath -> {
+                List<String> names = java.util.Arrays.asList(cyclePath.split(","));
+                assertThat(names).contains("service-a");
+                assertThat(names.get(0)).isEqualTo(names.get(names.size() - 1));
             });
         }
 
@@ -249,42 +250,37 @@ class ServiceRepositoryTest extends Neo4jTestContainerConfig {
             aFetched.getDependsOn().add(new DependsOnRelationship(a, "RUNTIME"));
             serviceRepository.save(aFetched);
 
-            List<List<String>> cycles = serviceRepository.findCyclesFrom("service-a");
+            List<String> cycles = serviceRepository.findCyclesFrom("service-a");
 
             assertThat(cycles).isNotEmpty();
         }
 
         @Test
         void shouldReturnTransitiveCycleForThreeNodeRing() {
-            // A→B→C→A — all three edges form a single three-node cycle (ADR-009)
+            // Build A→B→C→A bottom-up so the in-memory chain is complete before the final save.
+            // Pattern mirrors the working 2-node cycle test: cascade during the final save
+            // terminates on the original `a` node because SDN recognises the same Neo4j ID.
             ServiceNode a = serviceRepository.save(new ServiceNode("service-a", null));
-            ServiceNode b = new ServiceNode("service-b", null);
-            b.getDependsOn().add(new DependsOnRelationship(a, "RUNTIME")); // B→A placeholder; updated after C created
-            b = serviceRepository.save(b);
-            ServiceNode c = new ServiceNode("service-c", null);
-            c.getDependsOn().add(new DependsOnRelationship(b, "RUNTIME")); // C→B
-            serviceRepository.save(c);
-            // A→B
-            ServiceNode aFetched = serviceRepository.findByName("service-a").orElseThrow();
-            ServiceNode bFetched = serviceRepository.findByName("service-b").orElseThrow();
-            aFetched.getDependsOn().add(new DependsOnRelationship(bFetched, "RUNTIME"));
-            // B→C (replace the placeholder B→A with B→C)
-            bFetched.getDependsOn().clear();
-            ServiceNode cFetched = serviceRepository.findByName("service-c").orElseThrow();
-            bFetched.getDependsOn().add(new DependsOnRelationship(cFetched, "RUNTIME"));
-            // C→A already set; save updated nodes
-            serviceRepository.save(aFetched);
-            serviceRepository.save(bFetched);
-            // C→A: update c's dependency to point to aFetched
-            cFetched.getDependsOn().clear();
-            cFetched.getDependsOn().add(new DependsOnRelationship(aFetched, "RUNTIME"));
-            serviceRepository.save(cFetched);
 
-            List<List<String>> cycles = serviceRepository.findCyclesFrom("service-a");
+            ServiceNode c = new ServiceNode("service-c", null);
+            c.getDependsOn().add(new DependsOnRelationship(a, "RUNTIME")); // C→A
+            c = serviceRepository.save(c);
+
+            ServiceNode b = new ServiceNode("service-b", null);
+            b.getDependsOn().add(new DependsOnRelationship(c, "RUNTIME")); // B→C (c carries C→A)
+            b = serviceRepository.save(b);
+
+            ServiceNode aFetched = serviceRepository.findByName("service-a").orElseThrow();
+            aFetched.getDependsOn().add(new DependsOnRelationship(b, "RUNTIME")); // A→B
+            serviceRepository.save(aFetched);
+
+            List<String> cycles = serviceRepository.findCyclesFrom("service-a");
 
             assertThat(cycles).isNotEmpty();
-            assertThat(cycles).anySatisfy(cycle ->
-                    assertThat(cycle).contains("service-a", "service-b", "service-c"));
+            assertThat(cycles).anySatisfy(cyclePath -> {
+                List<String> names = java.util.Arrays.asList(cyclePath.split(","));
+                assertThat(names).contains("service-a", "service-b", "service-c");
+            });
         }
     }
 }
