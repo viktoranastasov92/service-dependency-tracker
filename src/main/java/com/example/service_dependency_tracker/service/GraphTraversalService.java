@@ -1,5 +1,6 @@
 package com.example.service_dependency_tracker.service;
 
+import com.example.service_dependency_tracker.exception.ServiceNotFoundException;
 import com.example.service_dependency_tracker.repository.ServiceRepository;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -11,7 +12,7 @@ public class GraphTraversalService {
     private final CycleReportingService cycleReportingService;
 
     @Value("${tracker.traversal.max-depth:50}")
-    private int maxDepth;
+    private int maxDepth = 50;
 
     public GraphTraversalService(ServiceRepository serviceRepository,
                                   CycleReportingService cycleReportingService) {
@@ -20,10 +21,24 @@ public class GraphTraversalService {
     }
 
     public TraversalResult getDownstream(String name) {
-        throw new UnsupportedOperationException("Not yet implemented");
+        if (!serviceRepository.existsByName(name)) {
+            throw new ServiceNotFoundException(name);
+        }
+        return new TraversalResult(
+                name,
+                serviceRepository.findAllDownstream(name, maxDepth),
+                serviceRepository.findSubgraphEdges(name, maxDepth),
+                cycleReportingService.findCycles(name));
     }
 
     public TraversalResult getUpstream(String name) {
-        throw new UnsupportedOperationException("Not yet implemented");
+        if (!serviceRepository.existsByName(name)) {
+            throw new ServiceNotFoundException(name);
+        }
+        return new TraversalResult(
+                name,
+                serviceRepository.findAllUpstream(name, maxDepth),
+                serviceRepository.findUpstreamSubgraphEdges(name, maxDepth),
+                cycleReportingService.findCycles(name));
     }
 }

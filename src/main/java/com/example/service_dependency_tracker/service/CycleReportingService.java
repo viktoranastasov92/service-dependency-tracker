@@ -15,6 +15,6 @@ public class CycleReportingService {
     }
 
     public List<List<String>> findCycles(String name) {
-        throw new UnsupportedOperationException("Not yet implemented");
+        return serviceRepository.findCyclesFrom(name);
     }
 }
