@@ -44,6 +44,7 @@ class ServiceDependencyTrackerIT extends Neo4jTestContainerConfig {
         @Test
         void shouldRegisterAndRetrieveAService() throws Exception {
             mockMvc.perform(post("/api/v1/services")
+                            .contextPath("/api/v1")
                             .contentType(MediaType.APPLICATION_JSON)
                             .content("""
                                     {"name":"payment-service","description":"Handles payments"}
@@ -51,7 +52,8 @@ class ServiceDependencyTrackerIT extends Neo4jTestContainerConfig {
                     .andExpect(status().isCreated())
                     .andExpect(jsonPath("$.name").value("payment-service"));
 
-            mockMvc.perform(get("/api/v1/services/payment-service"))
+            mockMvc.perform(get("/api/v1/services/payment-service")
+                            .contextPath("/api/v1"))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.name").value("payment-service"))
                     .andExpect(jsonPath("$.description").value("Handles payments"));
@@ -60,12 +62,14 @@ class ServiceDependencyTrackerIT extends Neo4jTestContainerConfig {
         @Test
         void shouldReturn409WhenRegisteringDuplicateServiceName() throws Exception {
             mockMvc.perform(post("/api/v1/services")
+                    .contextPath("/api/v1")
                     .contentType(MediaType.APPLICATION_JSON)
                     .content("""
                             {"name":"payment-service"}
                             """));
 
             mockMvc.perform(post("/api/v1/services")
+                            .contextPath("/api/v1")
                             .contentType(MediaType.APPLICATION_JSON)
                             .content("""
                                     {"name":"payment-service"}
@@ -77,15 +81,18 @@ class ServiceDependencyTrackerIT extends Neo4jTestContainerConfig {
         @Test
         void shouldDeleteServiceAndReturn404OnSubsequentGet() throws Exception {
             mockMvc.perform(post("/api/v1/services")
+                    .contextPath("/api/v1")
                     .contentType(MediaType.APPLICATION_JSON)
                     .content("""
                             {"name":"payment-service"}
                             """));
 
-            mockMvc.perform(delete("/api/v1/services/payment-service"))
+            mockMvc.perform(delete("/api/v1/services/payment-service")
+                            .contextPath("/api/v1"))
                     .andExpect(status().isNoContent());
 
-            mockMvc.perform(get("/api/v1/services/payment-service"))
+            mockMvc.perform(get("/api/v1/services/payment-service")
+                            .contextPath("/api/v1"))
                     .andExpect(status().isNotFound());
         }
 
@@ -94,7 +101,8 @@ class ServiceDependencyTrackerIT extends Neo4jTestContainerConfig {
             registerService("payment-service");
             registerService("user-auth-service");
 
-            mockMvc.perform(get("/api/v1/services"))
+            mockMvc.perform(get("/api/v1/services")
+                            .contextPath("/api/v1"))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$", hasSize(2)))
                     .andExpect(jsonPath("$[*].name",
@@ -115,6 +123,7 @@ class ServiceDependencyTrackerIT extends Neo4jTestContainerConfig {
             registerService("user-auth-service");
 
             mockMvc.perform(post("/api/v1/services/payment-service/dependencies")
+                            .contextPath("/api/v1")
                             .contentType(MediaType.APPLICATION_JSON)
                             .content("""
                                     {"dependsOnName":"user-auth-service","dependencyType":"RUNTIME"}
@@ -124,7 +133,8 @@ class ServiceDependencyTrackerIT extends Neo4jTestContainerConfig {
                     .andExpect(jsonPath("$.toService").value("user-auth-service"))
                     .andExpect(jsonPath("$.dependencyType").value("RUNTIME"));
 
-            mockMvc.perform(get("/api/v1/services/payment-service/dependencies"))
+            mockMvc.perform(get("/api/v1/services/payment-service/dependencies")
+                            .contextPath("/api/v1"))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$", hasSize(1)))
                     .andExpect(jsonPath("$[0].toService").value("user-auth-service"));
@@ -138,6 +148,7 @@ class ServiceDependencyTrackerIT extends Neo4jTestContainerConfig {
 
             // B→A creates a cycle — must succeed, not return 409 (ADR-006)
             mockMvc.perform(post("/api/v1/services/service-b/dependencies")
+                            .contextPath("/api/v1")
                             .contentType(MediaType.APPLICATION_JSON)
                             .content("""
                                     {"dependsOnName":"service-a","dependencyType":"RUNTIME"}
@@ -151,10 +162,12 @@ class ServiceDependencyTrackerIT extends Neo4jTestContainerConfig {
             registerService("user-auth-service");
             addDependency("payment-service", "user-auth-service", "RUNTIME");
 
-            mockMvc.perform(delete("/api/v1/services/payment-service/dependencies/user-auth-service"))
+            mockMvc.perform(delete("/api/v1/services/payment-service/dependencies/user-auth-service")
+                            .contextPath("/api/v1"))
                     .andExpect(status().isNoContent());
 
-            mockMvc.perform(get("/api/v1/services/payment-service/dependencies"))
+            mockMvc.perform(get("/api/v1/services/payment-service/dependencies")
+                            .contextPath("/api/v1"))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$", hasSize(0)));
         }
@@ -175,7 +188,8 @@ class ServiceDependencyTrackerIT extends Neo4jTestContainerConfig {
             addDependency("payment-service", "user-auth-service", "RUNTIME");
             addDependency("user-auth-service", "postgres-primary", "RUNTIME");
 
-            mockMvc.perform(get("/api/v1/services/payment-service/downstream"))
+            mockMvc.perform(get("/api/v1/services/payment-service/downstream")
+                            .contextPath("/api/v1"))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.origin").value("payment-service"))
                     .andExpect(jsonPath("$.services", hasSize(2)))
@@ -192,7 +206,8 @@ class ServiceDependencyTrackerIT extends Neo4jTestContainerConfig {
             addDependency("payment-service", "user-auth-service", "RUNTIME");
             addDependency("user-auth-service", "postgres-primary", "RUNTIME");
 
-            mockMvc.perform(get("/api/v1/services/postgres-primary/upstream"))
+            mockMvc.perform(get("/api/v1/services/postgres-primary/upstream")
+                            .contextPath("/api/v1"))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.origin").value("postgres-primary"))
                     .andExpect(jsonPath("$.services", hasSize(2)));
@@ -209,7 +224,8 @@ class ServiceDependencyTrackerIT extends Neo4jTestContainerConfig {
             addDependency("service-b", "service-d", "RUNTIME");
             addDependency("service-c", "service-d", "RUNTIME");
 
-            mockMvc.perform(get("/api/v1/services/service-a/downstream"))
+            mockMvc.perform(get("/api/v1/services/service-a/downstream")
+                            .contextPath("/api/v1"))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.services", hasSize(3)))
                     .andExpect(jsonPath("$.services[?(@.name=='service-d')]", hasSize(1)));
@@ -222,7 +238,8 @@ class ServiceDependencyTrackerIT extends Neo4jTestContainerConfig {
             addDependency("service-a", "service-b", "RUNTIME");
             addDependency("service-b", "service-a", "RUNTIME");
 
-            mockMvc.perform(get("/api/v1/services/service-a/downstream"))
+            mockMvc.perform(get("/api/v1/services/service-a/downstream")
+                            .contextPath("/api/v1"))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.cycles").isArray())
                     .andExpect(jsonPath("$.cycles", not(empty())));
@@ -232,7 +249,8 @@ class ServiceDependencyTrackerIT extends Neo4jTestContainerConfig {
         void shouldReturnEmptyDownstreamForIsolatedService() throws Exception {
             registerService("isolated-service");
 
-            mockMvc.perform(get("/api/v1/services/isolated-service/downstream"))
+            mockMvc.perform(get("/api/v1/services/isolated-service/downstream")
+                            .contextPath("/api/v1"))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.services", empty()))
                     .andExpect(jsonPath("$.cycles", empty()));
@@ -245,12 +263,14 @@ class ServiceDependencyTrackerIT extends Neo4jTestContainerConfig {
 
     private void registerService(String name) throws Exception {
         mockMvc.perform(post("/api/v1/services")
+                .contextPath("/api/v1")
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("{\"name\":\"" + name + "\"}"));
     }
 
     private void addDependency(String from, String to, String type) throws Exception {
         mockMvc.perform(post("/api/v1/services/" + from + "/dependencies")
+                .contextPath("/api/v1")
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("{\"dependsOnName\":\"" + to + "\",\"dependencyType\":\"" + type + "\"}"));
     }

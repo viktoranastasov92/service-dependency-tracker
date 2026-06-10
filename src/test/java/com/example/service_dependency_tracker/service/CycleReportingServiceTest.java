@@ -36,8 +36,8 @@ class CycleReportingServiceTest {
 
         @Test
         void shouldReturnDirectCycleWhenADependsOnBAndBDependsOnA() {
-            List<String> cycle = List.of("service-a", "service-b", "service-a");
-            when(serviceRepository.findCyclesFrom("service-a")).thenReturn(List.of(cycle));
+            when(serviceRepository.findCyclesFrom("service-a"))
+                    .thenReturn(List.of("service-a,service-b,service-a"));
 
             List<List<String>> cycles = cycleReportingService.findCycles("service-a");
 
@@ -47,8 +47,8 @@ class CycleReportingServiceTest {
 
         @Test
         void shouldReturnTransitiveCycleWhenADependsOnBDependsOnCDependsOnA() {
-            List<String> cycle = List.of("service-a", "service-b", "service-c", "service-a");
-            when(serviceRepository.findCyclesFrom("service-a")).thenReturn(List.of(cycle));
+            when(serviceRepository.findCyclesFrom("service-a"))
+                    .thenReturn(List.of("service-a,service-b,service-c,service-a"));
 
             List<List<String>> cycles = cycleReportingService.findCycles("service-a");
 
@@ -58,8 +58,8 @@ class CycleReportingServiceTest {
 
         @Test
         void shouldReturnSelfLoopCycleWhenServiceDependsOnItself() {
-            List<String> selfLoop = List.of("service-a", "service-a");
-            when(serviceRepository.findCyclesFrom("service-a")).thenReturn(List.of(selfLoop));
+            when(serviceRepository.findCyclesFrom("service-a"))
+                    .thenReturn(List.of("service-a,service-a"));
 
             List<List<String>> cycles = cycleReportingService.findCycles("service-a");
 
@@ -69,9 +69,9 @@ class CycleReportingServiceTest {
 
         @Test
         void shouldReturnAllDistinctCyclesWhenMultipleCyclesReachable() {
-            List<String> cycle1 = List.of("service-a", "service-b", "service-a");
-            List<String> cycle2 = List.of("service-a", "service-c", "service-d", "service-a");
-            when(serviceRepository.findCyclesFrom("service-a")).thenReturn(List.of(cycle1, cycle2));
+            when(serviceRepository.findCyclesFrom("service-a"))
+                    .thenReturn(List.of("service-a,service-b,service-a",
+                                        "service-a,service-c,service-d,service-a"));
 
             List<List<String>> cycles = cycleReportingService.findCycles("service-a");
 
