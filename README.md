@@ -2,6 +2,61 @@
 
 A tool for on-call engineers to register microservices, define dependency edges between them, and query the full upstream/downstream chain of any service to assess blast radius during incidents.
 
+## Architecture & Design Decisions
+
+- **Neo4j for Storage with Cypher as graph traversal implementation**
+    - I preferred using neo4j as the system core operation is graph traversal and although I do not have
+      real experience with that database, I chose it becase of the built-in support for graph-specific
+      relationship definitions. As it stores edges with physical pointers to their endpoints, so that
+      traversal can be a single Cypher query and one database round-trip regardless of depth. That additional
+      complexity in PostgreSQL for example was not worth that much the effort with these requirements.
+    - Trade-offs - smaller support community, can be challenging to deploy to production, will
+      be challenging to introduce the team to Cypher as database querying approach
+
+- **Spring boot with Maven**
+    - I am familiar and have most experience with them. The ecosystem for Spring Boot provides pretty much
+      everything needed and the team can start development immediately.
+    - Trade-offs - Quarkus will provide faster startup with lower memory
+
+- **Cycles handling**
+    - As per requirements cyclic dependencies should be allowed. That is why
+      I have allowed them. There is a bit of a more complex approach to handle those
+      dependencies but we will definitely have a support for legacy data that needs to
+      be imported if it also has such cyclic dependencies inside.
+    - Trade-offs - complexity as every consumer of the traversal results must handle
+      those cyclic dependencies (if such are present in the system). Detection queries
+      can also be expensive.
+
+- **Resource-oriented REST with nested sub-resources**
+    - I chose it because it is easily human-readable if for some reason the on-call
+      engineers need to directly hit the APIs instead of using the frontend.
+    - Trade-offs: Strict REST conventions like using only nouns and also not having a
+      flat URLs (e.g. "/services/{id}/dependencies/{depId}" is three levels deep).
+
+- **Error handling strategy with @RestControllerAdvice**
+    - Single audit point and clean controllers with no try/catch repeatable sections in them.
+    - Trade-offs: Throwing generic RuntimeException will bypass all typed handlers and hits
+      the catch-all 500 Http status code.
+
+- **Three-layer architecture (Controller -> Service -> Repository)**
+    - Intuitive for backend developers, easy to debug. A new member of the team can
+      locate the right class quickly. As it is a single-module application the architecture
+      should not be more complex than the problem it solves.
+    - Trade-offs: More complex to swap the persistence layer with a different database.
+      If no architecture tests are added then a developer can accidentally return a
+      @Node entity directly from a controller.
+
+- **API-first design approach**
+    - Better when aligning the API contracts between frontend and backend developers so that
+      there are no blockers or issues of something is implemented differently, breaking
+      changes will be caught much easier. We also have compile-time contract enforcement
+      and no hand-writing of boilerplate records is necessary - request/response model
+      classes are generated from the spec
+    - Trade-offs: We must be careful when upgrading Spring Boot as the generator version
+        must be compatible and mismatch can break the generated code. There is also
+        learning curve for the spec format using Cypher for the schemas. Specific
+        configurations might also be needed.
+
 ## Implementation Note
 
 This project was implemented entirely using [Claude Code](https://claude.ai/code) with the **Claude Sonnet** model. The prompts used throughout the implementation are recorded in [PROMPTS-HISTORY.md](PROMPTS-HISTORY.md) — new joiners can read through them to understand the sequence of steps taken to build the project from scratch.
@@ -287,6 +342,7 @@ The items below are out of scope for this prototype but required before the syst
 - **End-to-end browser tests** — add Playwright or Cypress tests that drive the full UI against a running backend to catch regressions in the graph visualisation and form interactions.
 - **Performance tests** — verify traversal query performance at realistic graph sizes (1 000+ services, 5 000+ edges) with a load test (k6, Gatling) targeting the downstream and upstream endpoints.
 - **Security scanning** — integrate OWASP Dependency-Check into the Maven build to surface known CVEs in third-party dependencies. Add a SAST scan (SpotBugs, Semgrep) to the CI pipeline.
+- **Architecture tests** - ensure architecture tests verify that there are strict rules for access between the different architecture layers - for example a service model must not be returned from the rest layer.
 
 ### CI / CD
 
